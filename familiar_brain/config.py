@@ -31,6 +31,18 @@ class Gate:
 class Paths:
     persona: str
     sessions_dir: str
+    # Defaulted so a brain.toml written before the lexicon existed still loads.
+    # Lexicon.load treats a missing file as an empty lexicon, so this is safe.
+    lexicon: str = "config/lexicon.tsv"
+
+
+@dataclass(frozen=True)
+class Knowledge:
+    db_path: str
+    notes_dir: str
+    chunks_per_corpus: int
+    max_context_chars: int
+    retention_days: int
 
 
 @dataclass(frozen=True)
@@ -39,6 +51,7 @@ class Config:
     upstream: Upstream
     gate: Gate
     paths: Paths
+    knowledge: Knowledge
 
 
 def load_config(path: Path | str) -> Config:
@@ -48,4 +61,5 @@ def load_config(path: Path | str) -> Config:
         upstream=Upstream(**raw["upstream"]),
         gate=Gate(**raw["gate"]),
         paths=Paths(**raw["paths"]),
+        knowledge=Knowledge(**raw["knowledge"]),
     )

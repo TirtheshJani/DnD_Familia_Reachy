@@ -18,6 +18,12 @@ follow_up_window_s = 8
 [paths]
 persona = "config/persona.yaml"
 sessions_dir = "data/sessions"
+[knowledge]
+db_path = "data/familiar.db"
+notes_dir = "data/notes"
+chunks_per_corpus = 3
+max_context_chars = 4800
+retention_days = 7
 """)
     c = load_config(p)
     assert c.server.port == 8090
@@ -25,3 +31,7 @@ sessions_dir = "data/sessions"
     assert c.upstream.classify_timeout_s == 0.6
     assert c.gate.follow_up_window_s == 8
     assert c.paths.sessions_dir == "data/sessions"
+    assert c.paths.lexicon == "config/lexicon.tsv"  # defaulted, absent from this TOML
+    assert c.knowledge.db_path == "data/familiar.db"
+    assert c.knowledge.chunks_per_corpus == 3
+    assert c.knowledge.retention_days == 7

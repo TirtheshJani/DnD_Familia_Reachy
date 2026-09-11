@@ -15,3 +15,11 @@ max_follow_ups = 3
 [paths]
 persona = "config/persona.yaml"
 sessions_dir = "data/sessions"
+lexicon = "config/lexicon.tsv"
+
+[knowledge]
+db_path = "data/familiar.db"
+notes_dir = "data/notes"
+chunks_per_corpus = 3
+max_context_chars = 4800
+retention_days = 7

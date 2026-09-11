@@ -29,6 +29,12 @@ follow_up_window_s = 8
 [paths]
 persona = "{persona.as_posix()}"
 sessions_dir = "{(tmp_path / 'sessions').as_posix()}"
+[knowledge]
+db_path = "{(tmp_path / 'k.db').as_posix()}"
+notes_dir = "{(tmp_path / 'notes').as_posix()}"
+chunks_per_corpus = 3
+max_context_chars = 4800
+retention_days = 7
 """)
     app = create_app(cfg)
     app.config["TESTING"] = True
