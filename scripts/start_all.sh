@@ -36,6 +36,12 @@ wait_for http://127.0.0.1:8080/health llama-server
 uv run --project "$REPO" familiar-brain config/brain.toml > data/brain.log 2>&1 &
 wait_for http://127.0.0.1:8090/api/state familiar-brain
 
+# The ggml TTS backend (qwentts-cpp) is built against CUDA 12 and dlopens
+# libcudart.so.12 and libcublas.so.12, but torch here resolves to cu13, so only the
+# CUDA 13 sonames are present. The cu12 shim wheels supply the missing ones; without
+# this path the pipeline dies at TTS setup. See docs/versions.md.
+export LD_LIBRARY_PATH="$(find "$S2S_VENV"/lib/python*/site-packages/nvidia -name lib -type d 2>/dev/null | tr '\n' ':')${LD_LIBRARY_PATH:-}"
+
 # No --mode flag in speech-to-speech 1.0.0: the realtime server is the `serve`
 # subcommand. See docs/protocol-notes.md section 7.
 "$S2S_VENV/bin/speech-to-speech" serve \

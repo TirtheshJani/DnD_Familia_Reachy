@@ -1,0 +1,163 @@
+# Pinned versions and measurements
+
+Everything below was read off the installed software or the live robot. Nothing is
+copied from the design document. Host: Zephyrus G14, Ryzen 9 7940HS, 16 GB RAM,
+RTX 4080 Laptop 12282 MiB, Windows 11 build 26200, WSL2 Ubuntu 24.04.
+
+## Pinned versions
+
+| Component | Version | Source |
+|---|---|---|
+| speech-to-speech | 1.0.0 | PyPI |
+| openai SDK (the client the brain must satisfy) | 2.28.0 | dependency of speech-to-speech |
+| llama.cpp | build 10751, variant `cuda130_hd5b56ce_0` | conda-forge |
+| llama-server reported version | 0.3.0-dev, commit 125c6d1 | `llama-server --version` |
+| Gemma 4 E4B GGUF | `ggml-org/gemma-4-E4B-it-GGUF:Q4_0`, repo sha `b8093469224f` | Hugging Face |
+| Qwen3-TTS | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`, ggml backend | Hugging Face, package default |
+| Parakeet-TDT | `nvidia/parakeet-tdt-0.6b-v3` on CUDA | Hugging Face, package default |
+| Smart Turn VAD | v3.2, `pipecat-ai/smart-turn-v3`, CPU provider | loaded automatically |
+| torch | 2.14.0+cu130, `cuda_available True` | PyPI |
+| transformers | 5.17.0 | PyPI |
+| Python (WSL2 runtime) | 3.12.3 | Ubuntu 24.04 |
+| Python (Windows test runs) | 3.11.6 | python.org |
+| uv | 0.12.13 | |
+| reachy_mini daemon | 1.10.0, wireless, hardware id `3ce93bd07b69ca28` | `GET /api/daemon/status` |
+
+Quantisation note: `-hf ...GGUF` with no suffix resolves to **Q8_0 (8.03 GB)**, which
+does not leave room for Parakeet and Qwen3-TTS on a 12 GB card. The suffix `:Q4_0`
+(4.59 GB) is deliberate, not incidental. Do not drop it.
+
+## Install, without sudo
+
+The distro had no `pip`, `gcc`, `cmake` or `nvcc`, and `sudo` needs a password, so
+there is no apt step and no source build. Everything lives under `$HOME`.
+
+```bash
+# uv
+curl -fsSL https://astral.sh/uv/install.sh | sh          # -> ~/.local/bin/uv
+
+# llama.cpp with CUDA, prebuilt rather than compiled
+curl -fsSL -o /tmp/miniforge.sh \
+  https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh
+bash /tmp/miniforge.sh -b -p "$HOME/miniforge3"
+source "$HOME/miniforge3/etc/profile.d/conda.sh"
+CONDA_OVERRIDE_CUDA=13.0 conda create -y -n llama -c conda-forge "llama.cpp=*=*cuda*"
+# -> ~/miniforge3/envs/llama/bin/llama-server
+
+# speech-to-speech
+uv venv "$HOME/.venvs/s2s" --python 3.12
+VIRTUAL_ENV="$HOME/.venvs/s2s" uv pip install speech-to-speech
+
+# CUDA 12 shims, see the next section
+VIRTUAL_ENV="$HOME/.venvs/s2s" uv pip install nvidia-cuda-runtime-cu12 nvidia-cublas-cu12
+
+# the brain itself needs a Linux venv, because the repo's .venv holds Windows binaries
+export UV_PROJECT_ENVIRONMENT="$HOME/.venvs/brain"
+uv sync --extra dev
+```
+
+### The CUDA 12 versus CUDA 13 trap
+
+`speech-to-speech` pulls torch `2.14.0+cu130`, so the venv ships only
+`libcudart.so.13`. The ggml TTS backend (`qwentts-cpp-python`, under
+`faster-qwen3-tts`) is built against CUDA 12 and dlopens `libcudart.so.12` and
+`libcublas.so.12`. The pipeline therefore dies at TTS setup with:
+
+```
+OSError: libcudart.so.12: cannot open shared object file: No such file or directory
+```
+
+Fix: install the two cu12 shim wheels above (3.3 MiB and ~600 MB) and put the nvidia
+lib directories on `LD_LIBRARY_PATH`, which `scripts/start_all.sh` does. The
+alternative is `--qwen3_tts_backend torch`, which avoids the ggml path entirely but
+costs more VRAM and latency.
+
+## WSL2 configuration, `%USERPROFILE%\.wslconfig`
+
+```ini
+[wsl2]
+memory=12GB
+processors=8
+networkingMode=mirrored
+
+[experimental]
+hostAddressLoopback=true
+```
+
+Both settings are load-bearing:
+
+- **Networking.** The default NAT mode put the distro on `192.168.94.249`. The robot
+  lives on `10.0.0.100` and cannot route there, so the robot could never reach
+  speech-to-speech regardless of bind address. Mirrored mode gives the distro the
+  host's own LAN address, `10.0.0.168`, which is what the robot must be pointed at.
+- **Memory.** The default ceiling was 7 GB, below what Parakeet plus Qwen3-TTS plus
+  llama-server need.
+
+Apply with `wsl --shutdown`. Revert by deleting the file and shutting down again.
+
+## Firewall, one elevated step still required
+
+The active network profile is **Public**, and the Hyper-V firewall that governs
+mirrored-mode WSL traffic reports `DefaultInboundAction: Block`. So nothing on the LAN,
+including the robot, can reach port 8765 until a rule exists. This needs an
+**administrator** PowerShell and could not be done from this session:
+
+```powershell
+New-NetFirewallHyperVRule -Name "WSL-s2s-8765" -DisplayName "speech-to-speech 8765 (WSL)" `
+  -Direction Inbound -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' `
+  -Protocol TCP -LocalPorts 8765 -Action Allow
+```
+
+Confirm afterwards from another device on the LAN:
+`curl -v telnet://10.0.0.168:8765` should connect rather than hang.
+
+## Working commands
+
+```bash
+# everything at once
+./scripts/start_all.sh
+
+# or individually
+~/miniforge3/envs/llama/bin/llama-server -hf ggml-org/gemma-4-E4B-it-GGUF:Q4_0 \
+  -np 2 -c 32768 -fa on --swa-full --port 8080 --host 127.0.0.1
+
+UV_PROJECT_ENVIRONMENT=~/.venvs/brain uv run familiar-brain config/brain.toml
+
+export LD_LIBRARY_PATH="$(find ~/.venvs/s2s/lib/python*/site-packages/nvidia -name lib -type d | tr '\n' ':')"
+~/.venvs/s2s/bin/speech-to-speech serve --host 0.0.0.0 --port 8765 \
+  --stt parakeet-tdt --tts qwen3 \
+  --llm_backend responses-api --model_name familiar \
+  --responses_api_base_url http://127.0.0.1:8090/v1 --responses_api_api_key "" \
+  --responses_api_stream --enable_live_transcription --thresh 0.6 --chat_size 12
+```
+
+Note there is no `--mode realtime`; `serve` is the realtime server in 1.0.0. See
+`docs/protocol-notes.md` section 7 for the full flag reconciliation.
+
+## Measurements
+
+VRAM, measured with `nvidia-smi --query-gpu=memory.used --format=csv,noheader`
+against the 12282 MiB total:
+
+| State | VRAM used |
+|---|---|
+| idle, nothing loaded | 731 MiB |
+| Parakeet only | 2473 MiB |
+| full stack idle | TBD |
+| full stack while speaking | TBD |
+
+Turn latency, from `timing.py` lines in `data/brain.log`. Target 1.5 s from end of
+speech to first audio, ceiling 2.5 s.
+
+| Path | total_ms |
+|---|---|
+| IGNORE (no model call) | TBD |
+| ADDRESSED, no tool | TBD |
+| ADDRESSED, with a dice roll | TBD |
+
+## Contract verification
+
+`scripts/sdk_contract_probe.py`, run against a live brain with the same openai SDK
+speech-to-speech uses, passes all ten checks: the non-streaming warmup body parses as
+a `Response`, and an unaddressed line yields exactly one `idle_do_nothing` tool call
+with a `call_`-prefixed id and zero spoken text.
