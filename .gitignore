@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+data/
+config/persona.yaml
+.pytest_cache/
+familiar_brain/static/
