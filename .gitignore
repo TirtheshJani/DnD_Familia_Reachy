@@ -5,3 +5,5 @@ data/
 config/persona.yaml
 .pytest_cache/
 familiar_brain/static/
+data/raw/
+config/players.txt
