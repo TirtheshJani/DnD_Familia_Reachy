@@ -31,9 +31,11 @@ class Gate:
 class Paths:
     persona: str
     sessions_dir: str
-    # Defaulted so a brain.toml written before the lexicon existed still loads.
-    # Lexicon.load treats a missing file as an empty lexicon, so this is safe.
+    # Both defaulted so a brain.toml written before they existed still loads, and both
+    # tolerate a missing file: an absent lexicon means no corrections, an absent players
+    # file means no names to scrub.
     lexicon: str = "config/lexicon.tsv"
+    players: str = "config/players.txt"
 
 
 @dataclass(frozen=True)

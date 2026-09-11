@@ -16,6 +16,7 @@ max_follow_ups = 3
 persona = "config/persona.yaml"
 sessions_dir = "data/sessions"
 lexicon = "config/lexicon.tsv"
+players = "config/players.txt"
 
 [knowledge]
 db_path = "data/familiar.db"

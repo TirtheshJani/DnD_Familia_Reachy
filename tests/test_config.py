@@ -32,6 +32,7 @@ retention_days = 7
     assert c.gate.follow_up_window_s == 8
     assert c.paths.sessions_dir == "data/sessions"
     assert c.paths.lexicon == "config/lexicon.tsv"  # defaulted, absent from this TOML
+    assert c.paths.players == "config/players.txt"  # defaulted too
     assert c.knowledge.db_path == "data/familiar.db"
     assert c.knowledge.chunks_per_corpus == 3
     assert c.knowledge.retention_days == 7

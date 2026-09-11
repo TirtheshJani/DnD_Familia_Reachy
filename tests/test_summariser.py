@@ -77,3 +77,44 @@ def test_purge_of_an_unknown_session_is_false_not_an_error(tmp_path):
     store = Store(tmp_path / "k.db", embedder=FakeEmbedder())
     (tmp_path / "sessions").mkdir()
     assert purge_session(tmp_path / "sessions", "nope", store=store) is False
+
+
+from familiar_brain.summariser import load_players, scrub_players  # noqa: E402
+
+
+def test_scrub_players_drops_lines_and_counts():
+    md = "## Scenes\n- The cistern\n- James rolled a natural twenty\n## NPCs met\n- Elias the barkeep\n"
+    out, dropped = scrub_players(md, players=["James", "Elias"])
+    assert dropped == 2 and "James" not in out and "Elias" not in out and "- The cistern" in out
+
+
+def test_scrub_players_is_word_bounded_and_case_insensitive():
+    out, dropped = scrub_players("- Jameson Street\n- jax laughed\n", players=["James", "Jax"])
+    assert dropped == 1 and "Jameson Street" in out
+
+
+def test_scrub_players_with_no_players_is_identity():
+    md = "## Scenes\n- The cistern\n"
+    assert scrub_players(md, players=[]) == (md, 0)
+
+
+def test_load_players_skips_blanks_and_comments(tmp_path):
+    p = tmp_path / "players.txt"
+    p.write_text("# a comment\nJames\n\n  Elias  \n", encoding="utf-8")
+    assert load_players(p) == ["James", "Elias"]
+
+
+def test_load_players_missing_file_is_empty(tmp_path):
+    assert load_players(tmp_path / "nope.txt") == []
+
+
+def test_summarise_session_drops_lines_naming_players(tmp_path):
+    class NamingLLM:
+        def complete(self, messages, max_tokens=1200):
+            return "## Scenes\n- The cistern\n- James rolled a twenty\n## NPCs met\n- The barkeep\n"
+
+    store = Store(tmp_path / "k.db", embedder=FakeEmbedder())
+    p = _session(tmp_path)
+    out = summarise_session(p, store=store, llm=NamingLLM(), players=["James"])
+    assert "James" not in out.read_text() and "The cistern" in out.read_text()
+    assert all("James" not in h.text for h in store.search("James twenty", corpus="sessions", k=10))

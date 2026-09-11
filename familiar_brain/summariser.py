@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from pathlib import Path
@@ -21,7 +22,38 @@ SUMMARY_PROMPT = (
 )
 
 
-def summarise_session(path: Path, *, store: Store, llm) -> Path:
+def load_players(path: Path | str) -> list[str]:
+    """Real first names of the people at the table. Gitignored; absent is normal."""
+    p = Path(path)
+    if not p.exists():
+        return []
+    return [l.strip() for l in p.read_text(encoding="utf-8").splitlines()
+            if l.strip() and not l.startswith("#")]
+
+
+def scrub_players(md: str, *, players: list[str]) -> tuple[str, int]:
+    """Drop whole summary lines that name somebody at the table.
+
+    SUMMARY_PROMPT already forbids it. This is the guard that does not depend on a
+    small model obeying an instruction, because the cost of one leak is a familiar
+    talking about real people at a table where it was only ever meant to talk about the
+    fiction. Dropping the whole line rather than the name is deliberate: a bullet with
+    the name cut out of it is still a sentence about a player.
+    """
+    if not players:
+        return md, 0
+    pat = re.compile(r"\b(" + "|".join(re.escape(p) for p in players) + r")\b", re.IGNORECASE)
+    kept: list[str] = []
+    dropped = 0
+    for line in md.splitlines():
+        if pat.search(line):
+            dropped += 1
+        else:
+            kept.append(line)
+    return "\n".join(kept) + ("\n" if md.endswith("\n") else ""), dropped
+
+
+def summarise_session(path: Path, *, store: Store, llm, players: list[str] = ()) -> Path:
     """Write a fiction-only summary beside the raw log and index both.
 
     The summary carries weight 1.5 so it outranks the raw transcript on a tie: a
@@ -31,6 +63,9 @@ def summarise_session(path: Path, *, store: Store, llm) -> Path:
     transcript = "\n".join(r["text"] for r in rows if r.get("text"))
     md = llm.complete([{"role": "system", "content": SUMMARY_PROMPT},
                        {"role": "user", "content": transcript}])
+    md, dropped = scrub_players(md, players=list(players))
+    if dropped:
+        log.warning("summariser dropped %d line(s) naming players from %s", dropped, Path(path).name)
     out = Path(path).with_suffix(".summary.md")
     out.write_text(md, encoding="utf-8")
     sid = Path(path).stem
@@ -47,11 +82,12 @@ def summarise_session(path: Path, *, store: Store, llm) -> Path:
     return out
 
 
-def summarise_in_background(path: Path, *, store: Store, llm) -> threading.Thread:
+def summarise_in_background(path: Path, *, store: Store, llm,
+                            players: list[str] = ()) -> threading.Thread:
     """Summarising is a several-second generation. The table should not wait on it."""
     def job() -> None:
         try:
-            summarise_session(path, store=store, llm=llm)
+            summarise_session(path, store=store, llm=llm, players=players)
         except Exception as e:
             log.error("summariser failed for %s: %s", Path(path).name, e)
     t = threading.Thread(target=job, daemon=True, name="summariser")

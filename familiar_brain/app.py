@@ -22,7 +22,12 @@ from familiar_brain.responses_api import (
     with_instructions_and_tools,
 )
 from familiar_brain.session import SessionLog
-from familiar_brain.summariser import apply_retention, purge_session, summarise_in_background
+from familiar_brain.summariser import (
+    apply_retention,
+    load_players,
+    purge_session,
+    summarise_in_background,
+)
 from familiar_brain.state import BrainState
 from familiar_brain.timing import TurnTimer
 from familiar_brain.tools import (
@@ -90,6 +95,7 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
     recall_tool.bind(store)
     sessions_dir = Path(cfg.paths.sessions_dir)
     apply_retention(sessions_dir, store=store, retention_days=cfg.knowledge.retention_days)
+    players = load_players(cfg.paths.players)
     upstream = Upstream(base_url=cfg.upstream.base_url, generate_slot=cfg.upstream.generate_slot,
                         brain_tool_names={s["name"] for s in tools.specs()})
 
@@ -216,7 +222,7 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
         if log.active_id is None:  # SessionLog.path would raise, which Flask turns into a 500
             return jsonify(error="no active session"), 409
         path = log.end()
-        summarise_in_background(path, store=store, llm=llm)
+        summarise_in_background(path, store=store, llm=llm, players=players)
         return jsonify(path=str(path), summarising=True)
 
     @app.delete("/api/session/<sid>")

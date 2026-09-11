@@ -1,0 +1,15 @@
+# One real first name per line. Copy to config/players.txt and edit; that file is
+# gitignored. Used only to drop summary lines that mention people at the table, so the
+# familiar's memory stays fiction. Blank lines and lines starting with # are ignored.
+#
+# Names heard in the 10 September recording that look like players rather than
+# characters. Verify each one before trusting it: a name that is actually an NPC will
+# silently delete good summary lines, and a real player left off leaks.
+James
+Elias
+Jax
+Jacob
+Harrison
+Adrian
+Riley
+Gabe
