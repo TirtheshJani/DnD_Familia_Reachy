@@ -1,8 +1,8 @@
 # Deviations from Plan 1
 
 Every departure from `plans/2026-09-10-reachy-familiar-plan-1-core.md`, with the reason
-and where to check it. Plan 1's own test total was 49; the suite now runs 67, the extra
-18 being the tests that cover the defects below. Sections A to C came from reading the
+and where to check it. Plan 1's own test total was 49; the suite now runs 68, the extra
+19 being the tests that cover the defects below. Sections A to C came from reading the
 plan and the installed packages; section E came from running the real stack.
 
 ## A. Defects found in the plan's code
@@ -311,3 +311,36 @@ and ends with "when in doubt answer IGNORE". Both of its remaining misses are
 conservative: it stays silent on "Roll me a d20 would you?" and on a burst of alarm it
 could have reacted to. Given the design asks for zero uninvited speech, erring that way
 is the right trade. The two misses are worth revisiting in the Plan 4 tuning pass.
+
+### E9. The classifier's context window made it worse, not better
+
+Design section 5 says layer 3 sends "the last four segments". Once E8's prompt was in
+place the familiar still spoke uninvited, and the cause was the context itself: as soon
+as any earlier segment named the familiar, the model read every line after it as part
+of one continuing conversation. Live example, verdict ADDRESSED on plain narration:
+
+```
+- Understudy, roll me a d20 with advantage.
+- Hello
+- the door creaks open somewhere in the dark
+```
+
+Scored on twelve labelled lines, several of them carrying exactly that contamination:
+
+| Classifier input | score | would speak uninvited |
+|---|---|---|
+| last four segments, as the design specifies | 4/12 | 7 times |
+| the last line alone | 11/12 | **0 times** |
+
+An explicit "the earlier lines are context only" caveat helped but did not close it:
+7/10 with 3 uninvited. Dropping the context entirely did.
+
+This is safe because layers 1 and 2 already handle the two cases the context was there
+to serve: layer 1 catches the familiar being named, and layer 2 catches the moment just
+after it spoke. Layer 3 only ever sees the residue, and for that the last line is the
+whole question. `Gate` still hands the classifier the recent segments, so reinstating
+context later is a one-line change.
+
+The single remaining miss is conservative: "He went down! Get him up, get him up!"
+reads as IGNORE rather than AMBIENT, so the familiar stays still instead of reacting.
+Worth revisiting in the Plan 4 tuning pass, along with E8's two misses.

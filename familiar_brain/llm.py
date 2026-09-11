@@ -36,7 +36,12 @@ class LLMClient:
         self.classify_timeout_s = classify_timeout_s
 
     def classify(self, segments: Sequence[str], *, persona_name: str) -> Decision:
-        lines = "\n".join(f"- {s}" for s in segments[-4:])
+        # Only the last line. Design 5 layer 3 calls for the last four segments, but
+        # measured on labelled table talk that context scored 4/12 with 7 uninvited
+        # replies, against 11/12 and none for the last line alone: any earlier segment
+        # naming the familiar made the model read everything after it as one continuing
+        # conversation. Layers 1 and 2 already cover "it was named" and "it just spoke".
+        lines = "\n".join(f"- {s}" for s in segments[-1:])
         body = {
             "messages": [
                 {"role": "system", "content": CLASSIFY_INSTRUCTION.format(name=persona_name)},
