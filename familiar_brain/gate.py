@@ -37,15 +37,24 @@ class Gate:
         if self.state.muted:
             return Decision.IGNORE
         last = segments[-1] if segments else ""
+        now = self.clock()
         if self.state.consume_speak_now() or self._pattern.search(last):
-            self.state.reset_follow_ups()
+            self.state.mark_named(now)
             return Decision.ADDRESSED
-        if self.state.last_spoke_at is not None and (self.clock() - self.state.last_spoke_at) < self.window:
-            # Speaking re-arms this window, so an uncapped chain means the familiar
-            # answers every utterance for the rest of a session that never goes quiet.
-            if self.state.follow_ups < self.max_follow_ups:
+        # The window is anchored to naming, not to speech. Anchoring it to speech meant
+        # every reply re-armed it, so the familiar answered the whole table forever.
+        if self.state.last_named_at is not None and self.state.follow_ups < self.max_follow_ups:
+            deadline = self.state.last_named_at + self.window
+            spoke = self.state.last_spoke_at
+            if (not self.state.window_extended and spoke is not None
+                    and self.state.last_named_at <= spoke <= deadline):
+                deadline = spoke + self.window   # single extension, from the first reply
+                self.state.window_extended = True
+            if now < deadline:
                 self.state.count_follow_up()
                 return Decision.ADDRESSED
+            log.info("follow-up window closed at %.1f; handing back to the classifier", deadline)
+        elif self.state.last_named_at is not None:
             log.info("follow-up chain hit %d; handing back to the classifier", self.max_follow_ups)
         if self.classifier is None:
             return Decision.IGNORE

@@ -344,3 +344,52 @@ context later is a one-line change.
 The single remaining miss is conservative: "He went down! Get him up, get him up!"
 reads as IGNORE rather than AMBIENT, so the familiar stays still instead of reacting.
 Worth revisiting in the Plan 4 tuning pass, along with E8's two misses.
+
+---
+
+# Deviations from Plan 2
+
+`plans/2026-09-11-reachy-familiar-plan-2-live-loop-and-knowledge.md` and its
+`revision-b` companion. Same rule as above: the behaviour the plan asks for, tested
+first; the structure of the code as it actually stands.
+
+## P1. The follow-up window anchors to naming (Task 1)
+
+Replaces design section 5 layer 2, and supersedes the cap-only fix recorded in E6.
+The window now opens when the familiar is named, aliased, or armed by Speak Now, and
+its deadline is fixed at that moment plus `follow_up_window_s`. The first reply after
+naming may push the deadline out once; later replies do not. `max_follow_ups` survives
+as a second guard for a rapid exchange inside a single open window.
+
+E6 capped the chain but left it anchored to speech, so a burst of three uninvited
+replies was still reachable after any single naming. Anchoring removes the re-arm
+entirely: after the window closes, only naming reopens it.
+
+Covered by `tests/test_gate_anchoring.py`, four tests.
+
+### P1a. The counter keeps its Plan 1 name
+
+The plan's snippet calls it `state.follow_up_grants`. The attribute already existed
+as `state.follow_ups` with `reset_follow_ups()` and `count_follow_up()`, so those were
+kept and `mark_named` calls `reset_follow_ups()`. Behaviour is what the plan specifies;
+only the spelling differs.
+
+### P1b. The plan's own anchoring test did not exercise the extension
+
+`test_reply_to_reply_does_not_re_arm_window` as written calls bare `st.mark_spoke()`,
+which stamps `time.time()`. No fake clock can reach that value, so
+`last_named_at <= spoke <= deadline` was always false and the single-extension branch
+was never entered. The four assertions still passed, for the wrong reason. Every
+`mark_spoke` in the anchoring tests now passes an explicit `at=`.
+
+### P1c. Five Plan 1 tests needed the clock advanced
+
+Predicted by the plan and confirmed: `test_alias_word_boundary_only`,
+`test_speak_now_arms_one_turn`, `test_follow_up_window_open_then_closed`,
+`test_classifier_used_only_when_earlier_layers_say_no`, and
+`test_mock_session_speaks_only_when_addressed`. Each named the familiar and then
+expected IGNORE on the next line with the clock frozen. Fixed by advancing a mutable
+clock past the window, or in the integration test by backdating `last_named_at`
+alongside `last_spoke_at`. No assertion was weakened. The stale docstring on
+`test_follow_up_window_does_not_chain_forever`, which described the speech anchoring
+this change removes, was rewritten to describe what the test now pins.

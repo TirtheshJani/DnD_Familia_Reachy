@@ -56,7 +56,11 @@ def test_mock_session_speaks_only_when_addressed(env):
     for line in FIX.read_text().splitlines():
         row = json.loads(line)
         if row.get("after_window"):  # simulate silence long enough to close the follow-up window
-            app.extensions["brain_state"].last_spoke_at -= 60
+            bs = app.extensions["brain_state"]
+            bs.last_spoke_at -= 60
+            # The window is anchored to naming now, so backdating speech alone leaves
+            # it wide open. Both stamps have to move.
+            bs.last_named_at -= 60
         if "classifier" in row:
             fake.chat_replies.append(row["classifier"])
         fake.responses_events.append([

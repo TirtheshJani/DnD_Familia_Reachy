@@ -14,9 +14,16 @@ class BrainState:
         self._speak_now_armed = False
         self.last_spoke_at: float | None = None
         self.recent_segments: list[str] = []
+        # When the familiar was last named, aliased, or armed by Speak Now. The
+        # follow-up window hangs off this rather than off last_spoke_at, because
+        # anchoring it to speech let every reply re-arm it. See docs/deviations.md E6.
+        self.last_named_at: float | None = None
+        # The first reply after being named may push the window out once. After that
+        # the deadline is fixed until somebody names the familiar again.
+        self.window_extended = False
         # How many turns in a row the follow-up window has granted since the familiar
-        # was last addressed outright. Speaking re-arms that window, so without a cap
-        # the grants chain indefinitely at a table that never falls silent.
+        # was last addressed outright. A cap on top of the fixed deadline, so a rapid
+        # exchange inside one window still hands back to the classifier.
         self.follow_ups = 0
 
     def arm_speak_now(self) -> None:
@@ -30,6 +37,12 @@ class BrainState:
 
     def mark_spoke(self, at: float | None = None) -> None:
         self.last_spoke_at = time.time() if at is None else at
+
+    def mark_named(self, at: float) -> None:
+        """A fresh conversation: reopen the window, allow one extension, reset the cap."""
+        self.last_named_at = at
+        self.window_extended = False
+        self.reset_follow_ups()
 
     def remember(self, segment: str, keep: int = 4) -> None:
         self.recent_segments = (self.recent_segments + [segment])[-keep:]

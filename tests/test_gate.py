@@ -3,33 +3,39 @@ from familiar_brain.gate import Gate, Decision
 
 
 def make(now=1000.0, window=8.0):
+    """Returns the clock as a mutable dict: the follow-up window now hangs off the
+    moment the familiar was named, so a test that names it and then expects IGNORE
+    has to let the clock run past the window."""
+    clock = {"t": now}
     st = BrainState()
     g = Gate(state=st, name="Understudy", aliases=("understudy", "little one"),
-             follow_up_window_s=window, classifier=None, clock=lambda: now)
-    return st, g
+             follow_up_window_s=window, classifier=None, clock=lambda: clock["t"])
+    return st, g, clock
 
 
 def test_muted_returns_ignore_even_when_named():
-    st, g = make()
+    st, g, _ = make()
     st.muted = True
     assert g.decide(["Understudy, roll for me"]) == Decision.IGNORE
 
 
 def test_name_in_segment_is_addressed():
-    _, g = make()
+    _, g, _ = make()
     assert g.decide(["Hey Understudy, what is a grapple?"]) == Decision.ADDRESSED
 
 
 def test_alias_word_boundary_only():
-    _, g = make()
+    _, g, clock = make()
     assert g.decide(["the little one hides"]) == Decision.ADDRESSED
+    clock["t"] += 20  # the alias opened the follow-up window; let it close
     assert g.decide(["I misunderstudy nothing"]) == Decision.IGNORE
 
 
 def test_speak_now_arms_one_turn():
-    st, g = make()
+    st, g, clock = make()
     st.arm_speak_now()
     assert g.decide(["what do you think"]) == Decision.ADDRESSED
+    clock["t"] += 20  # Speak Now counts as naming, so let its window close too
     assert g.decide(["what do you think"]) == Decision.IGNORE
 
 
@@ -38,6 +44,7 @@ def test_follow_up_window_open_then_closed():
     now = {"t": 1000.0}
     g = Gate(state=st, name="U", aliases=(), follow_up_window_s=8.0,
              classifier=None, clock=lambda: now["t"])
+    assert g.decide(["U, are you there?"]) == Decision.ADDRESSED  # naming opens the window
     st.mark_spoke(at=1000.0)
     now["t"] = 1005.0
     assert g.decide(["and then?"]) == Decision.ADDRESSED
@@ -46,11 +53,11 @@ def test_follow_up_window_open_then_closed():
 
 
 def test_follow_up_window_does_not_chain_forever():
-    """Layer 2 is anchored to the last time the familiar spoke, and speaking re-arms it.
-    At a table where someone talks every few seconds that window never closes, so the
-    familiar answers every utterance for the rest of the session. Observed live: six
-    consecutive ADDRESSED decisions at gate_ms 0.0, none of them addressed to it.
-    The chain is capped so it always returns to the real gate."""
+    """Observed live: six consecutive ADDRESSED decisions at gate_ms 0.0, none of them
+    addressed to it. Two things now stop that chain, and this test pins the cap. The
+    window is anchored to naming (see tests/test_gate_anchoring.py), and on top of that
+    only max_follow_ups grants are allowed before the gate hands back to the classifier,
+    so even a rapid exchange inside one open window terminates."""
     st = BrainState()
     now = {"t": 1000.0}
     seen = []
@@ -63,7 +70,7 @@ def test_follow_up_window_does_not_chain_forever():
              classifier=clf, clock=lambda: now["t"], max_follow_ups=3)
     assert g.decide(["Understudy, what do you see?"]) == Decision.ADDRESSED
     for i in range(3):  # the granted follow-ups
-        st.mark_spoke(at=now["t"])  # speaking re-arms the window
+        st.mark_spoke(at=now["t"])
         now["t"] += 1.0
         assert g.decide([f"line {i}"]) == Decision.ADDRESSED, f"follow-up {i} should be granted"
     st.mark_spoke(at=now["t"])
@@ -94,8 +101,10 @@ def test_classifier_used_only_when_earlier_layers_say_no():
     def clf(segments):
         calls.append(segments); return Decision.AMBIENT
     st = BrainState()
-    g = Gate(state=st, name="U", aliases=(), follow_up_window_s=8.0, classifier=clf, clock=lambda: 0.0)
+    now = {"t": 0.0}
+    g = Gate(state=st, name="U", aliases=(), follow_up_window_s=8.0, classifier=clf, clock=lambda: now["t"])
     assert g.decide(["U, hello"]) == Decision.ADDRESSED and calls == []
+    now["t"] += 20  # let the naming window close so layer 3 is the one that answers
     assert g.decide(["a natural twenty!"]) == Decision.AMBIENT and len(calls) == 1
 
 
