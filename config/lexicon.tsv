@@ -1,0 +1,21 @@
+# Canonical<TAB>variant|variant|...
+# Applied to every transcript line before logging, gating and retrieval.
+# A canonical term with no variants is still useful: it is a fuzzy-match target.
+# Grow this after the live loop, from the heard forms in the session log.
+Nephria	Nefrea|Nephria-Nephria
+Xeria	
+Kulchith	
+Styx	sticks
+Blackwater	black water
+Graywater Crossing	Greywater Crossing|Greywater
+The Greyest Water	Greyist Water
+The Drowned Pearl	Trial Pearl
+Trinivane	Trinifane|Trinity Estate
+ADA	Ada
+Thraka	Thraca|Brocka|Taraka
+Stormak	Tormek|Tarmac
+Alar	Malar|Molar|Pilar
+Nixon	Nexon
+Jam	Jem|Gem
+Mr Boom Boom	Mr Booze
+Entropic Paradox	Void Paradox
