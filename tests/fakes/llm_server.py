@@ -1,5 +1,6 @@
 """In-process fake of llama-server for tests. Serves /v1/chat/completions (non-stream)
-and /v1/responses (SSE stream). Scripted replies via queues."""
+and /v1/responses (SSE stream, or a JSON body when the request sets stream false).
+Scripted replies via queues."""
 from __future__ import annotations
 
 import json
@@ -12,6 +13,7 @@ class FakeLLM:
     def __init__(self):
         self.chat_replies: deque[str] = deque()
         self.responses_events: deque[list[dict]] = deque()
+        self.responses_json: deque[dict] = deque()
         self.requests: list[dict] = []
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
         self.port = self.server.server_address[1]
@@ -27,16 +29,25 @@ class FakeLLM:
         class H(BaseHTTPRequestHandler):
             def log_message(self, *a): pass
 
+            def _send_json(self, payload: dict):
+                out = json.dumps(payload).encode()
+                self.send_response(200); self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(out))); self.end_headers(); self.wfile.write(out)
+
             def do_POST(self):
                 n = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(n) or b"{}")
                 outer.requests.append({"path": self.path, "body": body})
                 if self.path.endswith("/chat/completions"):
                     text = outer.chat_replies.popleft() if outer.chat_replies else "IGNORE"
-                    out = json.dumps({"choices": [{"message": {"role": "assistant", "content": text}}]}).encode()
-                    self.send_response(200); self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(out))); self.end_headers(); self.wfile.write(out)
+                    self._send_json({"choices": [{"message": {"role": "assistant", "content": text}}]})
                 elif self.path.endswith("/responses"):
+                    if not body.get("stream"):
+                        self._send_json(outer.responses_json.popleft() if outer.responses_json else {
+                            "id": "resp_fake", "object": "response", "status": "completed",
+                            "created_at": 0, "model": body.get("model", "fake"), "output": [],
+                        })
+                        return
                     events = outer.responses_events.popleft() if outer.responses_events else [
                         {"type": "response.output_text.delta", "delta": "hello"},
                         {"type": "response.completed", "response": {"id": "r1", "output": []}},

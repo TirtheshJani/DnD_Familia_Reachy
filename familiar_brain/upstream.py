@@ -29,6 +29,17 @@ class Upstream:
         r.raise_for_status()
         return r
 
+    def complete(self, req: dict) -> dict:
+        """Non-streaming passthrough, returning the upstream Response body verbatim.
+
+        Used for the client's warmup probe and history compaction. Neither declares
+        tools, so no brain-side tool round trip is attempted on this path.
+        """
+        body = {**copy.deepcopy(req), "stream": False, "id_slot": self.generate_slot}
+        r = requests.post(f"{self.base_url}/responses", json=body, timeout=self.timeout_s)
+        r.raise_for_status()
+        return r.json()
+
     @staticmethod
     def _iter_events(resp: requests.Response) -> Iterator[dict]:
         buf = ""

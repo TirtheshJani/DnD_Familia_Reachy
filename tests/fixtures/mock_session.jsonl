@@ -1,0 +1,8 @@
+{"text": "You descend into the cistern. Water drips somewhere in the dark.", "expect": "IGNORE"}
+{"text": "I'll check for traps. Rolling perception.", "expect": "IGNORE"}
+{"text": "Natural twenty!", "expect": "AMBIENT", "classifier": "AMBIENT"}
+{"text": "Understudy, what do you make of the smell down here?", "expect": "ADDRESSED"}
+{"text": "Anything else?", "expect": "ADDRESSED"}
+{"text": "Okay let's move on, Gustave you're up.", "expect": "IGNORE", "classifier": "IGNORE", "after_window": true}
+{"text": "Can anyone remember how grapple works?", "expect": "IGNORE", "classifier": "IGNORE"}
+{"text": "Hey little one, roll me a d20 with advantage.", "expect": "ADDRESSED"}
