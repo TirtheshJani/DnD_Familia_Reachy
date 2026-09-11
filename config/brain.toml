@@ -10,6 +10,7 @@ classify_timeout_s = 0.6
 
 [gate]
 follow_up_window_s = 8
+max_follow_ups = 3
 
 [paths]
 persona = "config/persona.yaml"

@@ -1,8 +1,9 @@
 # Deviations from Plan 1
 
 Every departure from `plans/2026-09-10-reachy-familiar-plan-1-core.md`, with the reason
-and where to check it. Plan 1's own test total was 49; the suite now runs 58, the extra
-9 being the tests that cover the defects below.
+and where to check it. Plan 1's own test total was 49; the suite now runs 64, the extra
+15 being the tests that cover the defects below. Sections A to C came from reading the
+plan and the installed packages; section E came from running the real stack.
 
 ## A. Defects found in the plan's code
 
@@ -131,7 +132,7 @@ miniforge to `$HOME`, then the conda-forge `llama.cpp` **cuda130** prebuilt, and
 The repo lives on the Windows filesystem, so its `.venv` holds Windows binaries and
 cannot run in WSL. Running sets `UV_PROJECT_ENVIRONMENT=$HOME/.venvs/brain`, which
 keeps the Windows `.venv` usable for the Windows test run. The suite passes in both:
-58 on Windows (Python 3.11.6), 58 in WSL2 (Python 3.12.3).
+Windows (Python 3.11.6) and WSL2 (Python 3.12.3).
 
 ### C5. Windows paths inside TOML
 
@@ -243,3 +244,70 @@ broken, but AMBIENT could never fire and an addressed line that omitted the name
 always missed. Adding `reasoning_effort: none` to the classify body took it to 59 ms,
 about a tenfold margin. The timeout value itself is left alone for the Plan 4 tuning
 pass.
+
+### E6. The follow-up window never closed, so the familiar answered everything
+
+This is the most serious thing the live run turned up, and it is a flaw in the design
+rather than in the plan's transcription of it.
+
+Design section 5, layer 2, opens the gate when "the familiar finished speaking fewer
+than N seconds ago". Speaking is what re-arms that window. At a table where somebody
+says something every few seconds, the window therefore never closes: the familiar
+speaks, which re-arms it, so the next utterance is ADDRESSED, so it speaks again.
+
+Observed live, six consecutive turns, none of them addressed to it:
+
+```
+{"gate_ms": 0.0, "generation_ms": 359.4, "decision": "ADDRESSED", "spoke": true}
+{"gate_ms": 0.0, "generation_ms": 583.1, "decision": "ADDRESSED", "spoke": true}
+{"gate_ms": 0.0, "generation_ms": 370.6, "decision": "ADDRESSED", "spoke": true}
+... and so on
+```
+
+`gate_ms: 0.0` is the tell: no classifier call, the window alone was granting every
+turn. This fails the design's own headline success criterion, "speaks zero times when
+not addressed", and it would have done so for a whole four-hour session.
+
+The plan's integration test could not catch it, because it simulates the window
+closing by reaching into state and subtracting sixty seconds. Nothing in the code ever
+closed it.
+
+Fix: cap the number of consecutive follow-up grants, `max_follow_ups` in
+`[gate]`, default 3. Naming the familiar, or pressing Speak Now, resets the count and
+starts a fresh conversation. After the cap the gate hands back to the classifier.
+Covered by `test_follow_up_window_does_not_chain_forever` and
+`test_explicit_address_resets_the_follow_up_chain`.
+
+**This one is worth TJ's judgement.** A cap of 3 preserves a natural short exchange
+while guaranteeing the chain ends. If a different shape is wanted, for example
+anchoring the window to the last time the familiar was named rather than to the last
+time it spoke, that is a design decision rather than a bug fix.
+
+### E7. The startup warmup probe opened the window before anyone spoke
+
+Related, and the thing that exposed E6. The client's `warmup()` sends "Hello" at
+pipeline startup. The classifier called that ADDRESSED, the brain answered it, and the
+non-streaming path called `mark_spoke`, so the follow-up window was already open before
+a single word had been said at the table. The first real utterance was then treated as
+a follow-up.
+
+Fix: the non-streaming path no longer calls `mark_spoke`. It serves the warmup probe
+and history compaction, neither of which is speech in the room. Covered by
+`test_warmup_does_not_open_the_follow_up_window`.
+
+### E8. The layer 3 classifier read Dungeon Master narration as something to react to
+
+Once E5 made the classifier actually respond instead of timing out, its judgement
+became visible and it was poor. Scored against twelve labelled lines of table talk:
+
+| Prompt | score | notes |
+|---|---|---|
+| the plan's wording | 7/12 | called narration such as "You see a rusted iron door" AMBIENT |
+| revised wording | 10/12 | both misses fall toward silence |
+
+The revised instruction states plainly that almost everything at the table is between
+the humans, lists Dungeon Master narration and rules questions as IGNORE explicitly,
+and ends with "when in doubt answer IGNORE". Both of its remaining misses are
+conservative: it stays silent on "Roll me a d20 would you?" and on a burst of alarm it
+could have reacted to. Given the design asks for zero uninvited speech, erring that way
+is the right trade. The two misses are worth revisiting in the Plan 4 tuning pass.

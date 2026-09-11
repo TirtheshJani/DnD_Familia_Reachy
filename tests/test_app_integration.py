@@ -140,6 +140,29 @@ def test_non_streaming_addressed_turn_proxies_upstream(env):
     assert fake.requests[-1]["body"]["stream"] is False
 
 
+def test_warmup_does_not_open_the_follow_up_window(env):
+    """The client's warmup probe says "Hello" at startup. Observed live: the classifier
+    called that ADDRESSED, the brain answered, and marking it as speech opened the
+    follow-up window, so the very first real utterance at the table was treated as a
+    follow-up and answered too. A warmup probe is not speech at the table."""
+    client, fake, _tmp, app = env
+    client.post("/api/session/start")
+    fake.chat_replies.append("ADDRESSED")  # what the live classifier actually said
+    fake.responses_json.append({"id": "resp_warm", "object": "response", "status": "completed",
+                                "created_at": 0, "model": "familiar", "output": []})
+    client.post("/v1/responses", json={
+        "model": "familiar",
+        "input": [{"type": "message", "role": "user",
+                   "content": [{"type": "input_text", "text": "Hello"}]}]})
+    assert app.extensions["brain_state"].last_spoke_at is None, \
+        "a non-spoken warmup turn must not arm the follow-up window"
+    # so an unrelated line straight afterwards still goes through the real gate
+    fake.chat_replies.append("IGNORE")
+    resp = client.post("/v1/responses", json={
+        "input": [{"role": "user", "content": "You descend into the cistern."}], "stream": True})
+    assert _names(resp) == ["idle_do_nothing"]
+
+
 def test_session_end_without_a_session_is_a_clean_error(env):
     """SessionLog.path raises RuntimeError with no active session, which the plan's
     handler turns into a 500."""

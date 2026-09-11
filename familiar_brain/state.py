@@ -14,6 +14,10 @@ class BrainState:
         self._speak_now_armed = False
         self.last_spoke_at: float | None = None
         self.recent_segments: list[str] = []
+        # How many turns in a row the follow-up window has granted since the familiar
+        # was last addressed outright. Speaking re-arms that window, so without a cap
+        # the grants chain indefinitely at a table that never falls silent.
+        self.follow_ups = 0
 
     def arm_speak_now(self) -> None:
         with self._lock:
@@ -29,3 +33,10 @@ class BrainState:
 
     def remember(self, segment: str, keep: int = 4) -> None:
         self.recent_segments = (self.recent_segments + [segment])[-keep:]
+
+    def reset_follow_ups(self) -> None:
+        self.follow_ups = 0
+
+    def count_follow_up(self) -> int:
+        self.follow_ups += 1
+        return self.follow_ups

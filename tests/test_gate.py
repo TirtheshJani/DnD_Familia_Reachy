@@ -45,6 +45,50 @@ def test_follow_up_window_open_then_closed():
     assert g.decide(["and then?"]) == Decision.IGNORE
 
 
+def test_follow_up_window_does_not_chain_forever():
+    """Layer 2 is anchored to the last time the familiar spoke, and speaking re-arms it.
+    At a table where someone talks every few seconds that window never closes, so the
+    familiar answers every utterance for the rest of the session. Observed live: six
+    consecutive ADDRESSED decisions at gate_ms 0.0, none of them addressed to it.
+    The chain is capped so it always returns to the real gate."""
+    st = BrainState()
+    now = {"t": 1000.0}
+    seen = []
+
+    def clf(segments):
+        seen.append(segments[-1])
+        return Decision.IGNORE
+
+    g = Gate(state=st, name="Understudy", aliases=(), follow_up_window_s=8.0,
+             classifier=clf, clock=lambda: now["t"], max_follow_ups=3)
+    assert g.decide(["Understudy, what do you see?"]) == Decision.ADDRESSED
+    for i in range(3):  # the granted follow-ups
+        st.mark_spoke(at=now["t"])  # speaking re-arms the window
+        now["t"] += 1.0
+        assert g.decide([f"line {i}"]) == Decision.ADDRESSED, f"follow-up {i} should be granted"
+    st.mark_spoke(at=now["t"])
+    now["t"] += 1.0
+    assert g.decide(["still chatting"]) == Decision.IGNORE, "the chain must end"
+    assert seen == ["still chatting"], "the classifier must get the say once the cap is hit"
+
+
+def test_explicit_address_resets_the_follow_up_chain():
+    st = BrainState()
+    now = {"t": 1000.0}
+    g = Gate(state=st, name="Understudy", aliases=(), follow_up_window_s=8.0,
+             classifier=lambda s: Decision.IGNORE, clock=lambda: now["t"], max_follow_ups=2)
+    g.decide(["Understudy, hello"])
+    for i in range(2):
+        st.mark_spoke(at=now["t"]); now["t"] += 1.0
+        assert g.decide([f"f{i}"]) == Decision.ADDRESSED
+    st.mark_spoke(at=now["t"]); now["t"] += 1.0
+    assert g.decide(["exhausted"]) == Decision.IGNORE
+    # naming it again starts a fresh conversation, and fresh follow-ups
+    assert g.decide(["Understudy, again"]) == Decision.ADDRESSED
+    st.mark_spoke(at=now["t"]); now["t"] += 1.0
+    assert g.decide(["and now?"]) == Decision.ADDRESSED
+
+
 def test_classifier_used_only_when_earlier_layers_say_no():
     calls = []
     def clf(segments):

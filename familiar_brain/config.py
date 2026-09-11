@@ -22,6 +22,9 @@ class Upstream:
 @dataclass(frozen=True)
 class Gate:
     follow_up_window_s: float
+    # Consecutive follow-up grants allowed before the gate is handed back to the
+    # classifier. Defaulted so a brain.toml written before this existed still loads.
+    max_follow_ups: int = 3
 
 
 @dataclass(frozen=True)

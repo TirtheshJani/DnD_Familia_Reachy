@@ -36,6 +36,7 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
                     classify_timeout_s=cfg.upstream.classify_timeout_s)
     gate = Gate(state=state, name=persona.name, aliases=persona.aliases,
                 follow_up_window_s=cfg.gate.follow_up_window_s,
+                max_follow_ups=cfg.gate.max_follow_ups,
                 classifier=lambda segs: llm.classify(segs, persona_name=persona.name))
     for mod in (roll_tool, initiative_tool, note_tool):
         tools.register(mod)
@@ -63,8 +64,9 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
         except Exception as e:  # upstream down: degrade to silence
             app.logger.error("upstream failed (non-streaming): %s", e)
             body, spoke = idle_response_json(model=model), False
-        if spoke:
-            state.mark_spoke()
+        # Deliberately no mark_spoke here. This path serves the client's warmup probe
+        # and history compaction, neither of which is speech at the table, and marking
+        # it would open the follow-up window before anyone has said anything.
         _log(text, decision, spoke=spoke)
         timer.mark("generation")
         timer.finish(decision=decision.value, spoke=spoke)
