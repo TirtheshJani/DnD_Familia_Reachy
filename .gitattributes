@@ -1,0 +1,2 @@
+# Shell scripts run inside WSL2; CRLF would break the shebang and every line.
+*.sh text eol=lf
