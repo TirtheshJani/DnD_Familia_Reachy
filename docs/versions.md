@@ -219,3 +219,45 @@ Dice, four consecutive live turns, from the brain's INFO log beside what was spo
 
 Every spoken number matches the tool's total, advantage keeps the higher of two dice,
 and no brain-side tool call reached the client.
+
+## What is left, and who has to do it
+
+Three things could not be done from this session.
+
+**1. The firewall rule (needs administrator).** Command in the firewall section above.
+Until it exists the robot cannot reach port 8765 no matter what else is correct.
+
+**2. Point the conversation app at the brain.** The robot has the app installed but
+nothing running (`GET /api/apps/current-app-status` returns null, and the app lock is
+free). Start it from the robot dashboard at `http://10.0.0.100:8000`, install the
+`robot_profile/familiar` profile per the app's README, and set the connection to
+`ws://<host-lan-ip>:8765/v1/realtime`, reading the address from `check_env.sh` first.
+The connection URL and profile live in the app's own interface, not in the daemon REST
+API, so this is a manual step.
+
+**3. Say something to it.** Everything up to the microphone is verified, but nobody in
+this session could speak in the room. The audio path, Parakeet transcription, the VAD
+threshold and Qwen3-TTS playback are the parts still unexercised end to end.
+
+A first pass at the table, roughly the plan's Task 13 Step 3:
+
+```bash
+./scripts/start_all.sh
+curl -X POST http://127.0.0.1:8090/api/session/start
+```
+
+- Say a sentence that does not name the familiar. Expect silence, and an `IGNORE` line
+  in `data/brain.log`.
+- Say "Understudy, roll me a d20." Expect a spoken total matching the `tool roll`
+  line in the log.
+- Ask a follow-up within eight seconds. Expect a reply without naming it.
+- Keep talking past three follow-ups. Expect it to fall quiet again, which is the
+  `max_follow_ups` cap from deviation E6.
+
+```bash
+curl -X POST http://127.0.0.1:8090/api/session/end
+cat data/sessions/*.jsonl
+```
+
+Then tune `--thresh` (VAD) and `[gate] follow_up_window_s` and `max_follow_ups` against
+what the table actually sounds like. That is the Plan 4 work.
