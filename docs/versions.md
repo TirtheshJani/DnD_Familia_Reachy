@@ -261,3 +261,68 @@ cat data/sessions/*.jsonl
 
 Then tune `--thresh` (VAD) and `[gate] follow_up_window_s` and `max_follow_ups` against
 what the table actually sounds like. That is the Plan 4 work.
+
+---
+
+## Plan 2: knowledge layer
+
+### Embedding model
+
+`BAAI/bge-small-en-v1.5`, pinned in `familiar_brain/embeddings.py` as
+`BgeEmbedder.MODEL`. Revision actually downloaded and used here:
+`5c38ec7c405ec4b44b94cc5a9bb96e735b38267a`. 384 dimensions, CPU only, about 130 MB.
+Loaded lazily, so nothing downloads until something is indexed or retrieved. Verified
+by `tests/test_embeddings.py::test_bge_embedder_loads_on_cpu_and_has_384_dims`, which is
+marked `slow` and excluded from the default run.
+
+### sqlite-vec
+
+`sqlite-vec` 0.1.9. Both KNN forms work on this version, `WHERE embedding MATCH ? AND
+k = ?` and `ORDER BY distance LIMIT ?`; the first is used. `corpus` is a `vec0` metadata
+column so the KNN search is scoped rather than filtered afterwards, see deviation P6.
+
+### Notes index, first build
+
+`uv run familiar-brain index notes` against the ten curated files in `data/notes/`:
+
+```
+index: {'indexed': 10, 'skipped': 0}
+chunks: homebrew 11, notes 69
+```
+
+Retrieval spot-checked with the real embedder, top hit for each query:
+
+| query | corpus | top hit |
+|---|---|---|
+| what happens on a critical hit | homebrew | house-rules.md, Injuries, 0.655 |
+| what are Sanity skills | homebrew | house-rules.md, Custom skill system, 0.650 |
+| what is Styx water | notes | 01-world-cosmology.md, Styx water and memory, 0.634 |
+| who is Thraka | notes | 06-roster-and-npcs.md, The Graywater party, 0.558 |
+| tell me about the Graywater Crossing | notes | 03-nephria-city.md, The Graywater Crossing, 0.686 |
+
+Every one lands on the right file and the right heading, and the homebrew queries stay
+inside the homebrew corpus. The rules corpus is empty until the SRD PDFs are downloaded.
+
+### Environment: SSL_CERT_FILE is broken on this machine
+
+`SSL_CERT_FILE` points at `C:\ProgramData\miniconda3/ssl/cacert.pem`, which does not
+exist, so `uv` and `huggingface_hub` trust no certificate authority at all. Every fetch
+fails with `invalid peer certificate: UnknownIssuer`, and `uv sync` piped to another
+command still reports exit 0. Work around it per shell:
+
+```bash
+export SSL_CERT_FILE="$(.venv/Scripts/python.exe -c 'import certifi;print(certifi.where())')"
+```
+
+Nothing in the repo depends on this; it is a stale miniconda leftover in the user
+environment. Worth removing from the environment permanently.
+
+### Live loop 1
+
+Not yet run. See `docs/live-loop.md`. Paste the `gate-report` output, the final
+`--thresh` and `follow_up_window_s` here when it has been.
+
+### Summariser check
+
+Not yet run against a real transcript. Needs `docs/live-loop.md` to have produced
+`tests/fixtures/live_session_1.jsonl` and llama-server to be up.

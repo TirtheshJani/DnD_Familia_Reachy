@@ -154,6 +154,8 @@ VRAM impact: SmolVLM2 2.2B adds roughly 2 GB if needed. If the budget does not c
 
 Consent: the camera sees other players. The companion UI mute state also disables `camera` (tool calls return "eyes closed"), and the physical mute cue covers both senses. Raise camera use at Session Zero alongside listening.
 
+Deep night. When an utterance matches the deep-night rule (the phrase "deep night" spoken by the DM, or a Speak Now note "deep night"), the familiar enters a still state: antennas down, head lowered, gate forced to IGNORE, camera closed, until an utterance matches "deep night is over" or Speak Now "morning". This is a Plan 3 motion behaviour built on the Plan 2 mute state.
+
 ## 5. Address gate
 
 Evaluated in order. Mute check first, then the three layers. First layer to return a decision wins.

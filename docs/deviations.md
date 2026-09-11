@@ -393,3 +393,126 @@ clock past the window, or in the integration test by backdating `last_named_at`
 alongside `last_spoke_at`. No assertion was weakened. The stale docstring on
 `test_follow_up_window_does_not_chain_forever`, which described the speech anchoring
 this change removes, was rewritten to describe what the test now pins.
+
+## P2. Revision B's `nephria-context/` is this repo's `plans/0*.md` (Task R1)
+
+R1 copies the curated set from `nephria-context/`. No such directory exists. The set is
+`plans/00-README.md` through `plans/09-lexicon.md`, which `plans/00-README.md` itself
+confirms: "every file here can be dropped into `data/notes/` and indexed as-is". Those
+ten files were copied, not moved, and `05-house-rules.md` became
+`data/notes/homebrew/house-rules.md`.
+
+R1 also moves "the seven recorder .txt files" into `data/raw/`. No such files exist
+anywhere in the repo, so `data/raw/` was created empty. Nothing was lost; there was
+nothing to move.
+
+### P2a. `data/notes/` is not tracked by git
+
+`.gitignore` has excluded `data/` since Plan 1, so the curated corpus is local only and
+a fresh clone starts with no notes. The tracked source of truth stays `plans/0*.md`.
+`docs/notes-policy.md` gained a "Seeding a fresh clone" section with the three commands
+that rebuild the working copy, and a warning that anything written into `data/notes/`
+afterwards, session recaps most of all, exists on one machine until somebody writes it
+back into `plans/`.
+
+## P3. Task ordering: R2 and R4 partly land inside base Task 10
+
+Revision B slots R2 before base Task 9 and R4 before base Task 10, but R2 Step 4 edits
+`knowledge.CORPORA` and R4 Step 5 adds an assertion to `tests/test_app_knowledge.py`,
+and base Task 10 is what creates both of those files. Writing them twice would have been
+theatre, so:
+
+- R2's `index_notes` change ran in its own commit before Task 9, as the revision asks.
+- R2's `CORPORA = ("homebrew", "rules", "notes", "sessions")` was written into
+  `knowledge.py` when Task 10 created it, together with R2's ordering test.
+- R4's `lexicon.py`, `config/lexicon.tsv` and config wiring ran before Task 10; R4's
+  `app.py` wiring and its integration assertion landed in Task 10's commit, because both
+  tasks edit the same handler and editing it twice invites a merge error for no gain.
+
+Likewise R3 replaces base Task 9's `lookup_rule.run` outright, so only the R3 version was
+ever written and the two tasks share one commit.
+
+## P4. `[paths] players` instead of a hardcoded path (Task R5)
+
+R5 has `create_app` pass `load_players("config/players.txt")` literally. That resolves
+against the working directory and would let a real `config/players.txt` change what the
+test suite does. It is now `cfg.paths.players`, defaulted to `"config/players.txt"`, so
+the default behaviour is identical and the integration fixture can point somewhere else.
+`paths.lexicon` is defaulted the same way and for the same reason.
+
+## P5. `pymupdf` rather than `fitz`
+
+Both plans' snippets `import fitz`. The installed PyMuPDF emits a DeprecationWarning for
+that name and asks for `import pymupdf`. Used in `familiar_brain/chunking.py` and
+`tests/test_chunking.py`. No behavioural difference.
+
+## P6. Corpus scoping had to move inside the KNN query (Task 6)
+
+The plan filters by corpus in SQL *after* taking the `k * 8` nearest neighbours, and
+notes that the over-fetch is there "to keep recall when corpora are mixed". It does not.
+Demonstrated with a test before changing anything: with 2000 rules chunks indexed beside
+one notes chunk, all sharing vocabulary with the query, every candidate came back a rules
+chunk and `search(corpus="notes")` returned **zero** hits. In production that is the
+normal shape of the store, two SRDs against a handful of notes, so `recall` and the
+notes and sessions lines of the "What you know" block would have been silently empty.
+
+`corpus` is now a `vec0` metadata column, verified supported on sqlite-vec 0.1.9, so the
+KNN search itself is scoped. Over-fetch is still needed, because `weight` can lift a
+slightly more distant chunk, but it is now `k * 4` *within the corpus* rather than a
+global candidate set. Covered by
+`test_search_still_finds_a_small_corpus_beside_a_large_one`.
+
+A store built before this change has the old `vec` schema and will not pick up the new
+column, since `CREATE VIRTUAL TABLE IF NOT EXISTS` does not migrate. Delete
+`data/familiar.db` and reindex. No such store existed when this landed.
+
+## P7. Tests added beyond the plan's list
+
+Each covers a public function or endpoint the plan created but did not test, which the
+repo's review standard requires:
+
+- `test_label_session_enter_keeps_the_gate_decision`, and
+  `test_gate_report_with_no_spoken_turns_reports_none_not_a_crash` (empty latency list).
+- `test_missing_file_is_an_empty_lexicon` and `test_canonical_spelling_is_left_alone`.
+- `test_homebrew_files_are_skipped_on_a_second_pass_too`: `sources()` is per corpus, so
+  without merging both corpora every reindex would re-chunk the house rules.
+- `test_build_context_names_the_edition_of_a_rules_hit`.
+- `test_summarise_twice_does_not_duplicate_chunks` and
+  `test_purge_of_an_unknown_session_is_false_not_an_error`.
+- `test_session_end_summarises_in_the_background`, `test_sessions_listing_then_purge`,
+  `test_purge_of_an_unknown_session_is_false`, `test_reindex_endpoint_reports_counts`,
+  `test_retrieval_is_timed_and_the_tools_are_offered`: the five endpoints Plan 2 adds.
+- `test_lexicon_corrects_the_logged_and_forwarded_text`: R4's integration assertion,
+  widened to check the session log as well as the forwarded request.
+
+## P8. Lexicon entries that can fire on ordinary words
+
+Implemented exactly as R4 specifies, but three of its variants are common English:
+`sticks` becomes Styx, `Gem` becomes Jam, `Molar` becomes Alar. "We gathered sticks for
+the fire" will be corrected to "Styx". The fuzzy pass is guarded (six characters
+minimum, 0.86 similarity, canonical spellings left alone) but the exact-variant pass is
+not, by design, because those are the mishearings the table actually produced. Worth
+watching at the live loop: the Vocabulary line in `docs/live-loop.md` is what settles it,
+and dropping a variant is a one-line edit to `config/lexicon.tsv`.
+
+## P9. The retrieval seam, and what was not run
+
+`indexing.open_store(cfg)` is the single seam the app and the CLI share, and the one
+`tests/test_app_knowledge.py` monkeypatches to a `FakeEmbedder`-backed store. No test
+downloads a model.
+
+Three steps need a human in the room or files that cannot be redistributed, and were
+deliberately not run:
+
+- **Task 4, the live loop.** Needs the robot, the room, and TJ reading
+  `docs/live-loop.md` aloud. `tests/fixtures/live_session_1.jsonl` does not exist yet.
+- **Task 8 Step 5, indexing the SRDs.** The PDFs are not in the repo and are not
+  redistributed. `README.md` carries the CC-BY-4.0 attribution and the two index
+  commands. The `rules` corpus is empty until they are run, so `lookup_rule` currently
+  answers from `homebrew` only.
+- **Task 11 Step 6, summarising the real transcript**, and **Task 12 Step 4, the live
+  check.** Both depend on Task 4.
+
+What was run instead: the notes corpus was indexed for real with `BgeEmbedder` and
+spot-checked across both corpora, recorded in [versions.md](docs/versions.md) under
+"Notes index, first build". The `slow` embedder test was run once and passes.
