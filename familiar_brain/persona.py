@@ -54,7 +54,10 @@ def load_persona(path: Path | str) -> Persona:
     )
 
 
-def render_system_prompt(p: Persona) -> str:
+def render_system_prompt(p: Persona, context: str = "") -> str:
+    """`context` is the retrieved "What you know" block, or "" on a turn with nothing
+    retrieved. It goes first, before the persona, so the model reads the facts it has
+    been handed before it is told how to speak."""
     persona_block = (
         f"You are {p.name}, a familiar bound to a player character at a tabletop game of Dungeons & Dragons "
         f"set in the city of Nephria, an Art Deco noir setting. You are a creature, not an assistant.\n"
@@ -78,4 +81,5 @@ def render_system_prompt(p: Persona) -> str:
         "verbatim. Never invent or calculate a dice result yourself.\n"
     )
     length_block = "Keep every reply to at most two spoken sentences unless explicitly asked for more."
-    return "\n\n".join([persona_block, off_limits_block + dm_block + tool_block, length_block])
+    prompt = "\n\n".join([persona_block, off_limits_block + dm_block + tool_block, length_block])
+    return f"{context}\n\n{prompt}" if context else prompt
