@@ -43,16 +43,22 @@ def gate_report(session_path: Path, brain_log: Path) -> dict[str, Any]:
     uninvited = sum(1 for r in labelled if r.get("spoke") and r["expected"] != "ADDRESSED")
     missed = sum(1 for r in labelled if r["expected"] == "ADDRESSED" and not r.get("spoke"))
     lat: list[float] = []
-    for line in Path(brain_log).read_text(encoding="utf-8").splitlines():
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue  # the brain log carries plain log lines alongside the timing records
-        if rec.get("decision") == "ADDRESSED" and rec.get("spoke"):
-            lat.append(float(rec["total_ms"]))
+    log_path = Path(brain_log)
+    # The brain log is written by the running service, which lives in WSL, and its path
+    # is typed by hand per docs/live-loop.md. Losing the whole report to a typo, after
+    # labelling is already done, is worse than reporting the counts without latency.
+    missing = not log_path.exists()
+    if not missing:
+        for line in log_path.read_text(encoding="utf-8").splitlines():
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # the brain log carries plain log lines beside the timing records
+            if rec.get("decision") == "ADDRESSED" and rec.get("spoke"):
+                lat.append(float(rec["total_ms"]))
     lat.sort()
     p95 = lat[min(len(lat) - 1, int(round(0.95 * (len(lat) - 1))))] if lat else None
-    return {
+    report = {
         "turns": len(labelled),
         "accuracy": round(correct / len(labelled), 3) if labelled else None,
         "uninvited_speech": uninvited,
@@ -60,6 +66,10 @@ def gate_report(session_path: Path, brain_log: Path) -> dict[str, Any]:
         "latency_median_ms": statistics.median(lat) if lat else None,
         "latency_p95_ms": p95,
     }
+    if missing:
+        # Explicit, so a None latency cannot be read as "latency was fine".
+        report["brain_log_missing"] = True
+    return report
 
 
 def main(argv: list[str] | None = None) -> None:

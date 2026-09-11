@@ -516,3 +516,16 @@ deliberately not run:
 What was run instead: the notes corpus was indexed for real with `BgeEmbedder` and
 spot-checked across both corpora, recorded in [versions.md](docs/versions.md) under
 "Notes index, first build". The `slow` embedder test was run once and passes.
+
+## P10. `gate-report` survives a missing brain log (Task 2)
+
+Found by running the CLI against a real session file rather than a fixture.
+`docs/live-loop.md` has you type the brain log path by hand, and it lands after
+labelling is already done, so a typo or a wrong platform threw
+`FileNotFoundError: data\brain.log` and lost the whole report. On this Windows checkout
+the file does not exist at all, because the service that writes it runs in WSL.
+
+`gate_report` now reports the counts regardless and adds `"brain_log_missing": true`,
+so a null latency cannot be read as "latency was fine". Covered by
+`test_gate_report_says_so_when_the_brain_log_is_missing` and
+`test_gate_report_omits_the_missing_flag_when_the_log_is_there`.
