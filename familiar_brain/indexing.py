@@ -18,20 +18,28 @@ def index_rules(store: Store, pdf: Path, *, edition: str) -> int:
 
 
 def index_notes(store: Store, notes_dir: Path) -> dict[str, int]:
-    """Index every markdown note, skipping files unchanged since they were last indexed.
+    """Index every note, skipping files unchanged since they were last indexed.
 
-    Source keys are stored posix-style so a store built on Windows and one built in
-    WSL agree, which matters because both run against the same repo.
+    Anything under `homebrew/` becomes the `homebrew` corpus, which lookup_rule
+    searches before the SRD, because the table's own rules beat the book. Everything
+    else is `notes`. Source keys are stored posix-style so a store built on Windows
+    and one built in WSL agree, which matters because both run against the same repo.
+    `.txt` is read too; markdown_chunks treats a file with no headings as one section,
+    so plain text needs no separate chunker.
     """
-    known = store.sources("notes")
+    # sources() is per corpus, so both have to be merged or every homebrew file would
+    # look unknown to a notes-only lookup and be re-chunked on every pass.
+    known = {**store.sources("notes"), **store.sources("homebrew")}
     indexed = skipped = 0
-    for md in sorted(Path(notes_dir).glob("**/*.md")):
-        src = md.relative_to(notes_dir).as_posix()
-        if src in known and md.stat().st_mtime <= known[src]:
+    files = sorted(list(Path(notes_dir).glob("**/*.md")) + list(Path(notes_dir).glob("**/*.txt")))
+    for f in files:
+        src = f.relative_to(notes_dir).as_posix()
+        corpus = "homebrew" if src.startswith("homebrew/") else "notes"
+        if src in known and f.stat().st_mtime <= known[src]:
             skipped += 1
             continue
         store.delete_source(src)
-        store.add_chunks(markdown_chunks(md.read_text(encoding="utf-8"), source=src, corpus="notes"))
+        store.add_chunks(markdown_chunks(f.read_text(encoding="utf-8"), source=src, corpus=corpus))
         indexed += 1
     log.info("notes indexed=%d skipped=%d from %s", indexed, skipped, notes_dir)
     return {"indexed": indexed, "skipped": skipped}
