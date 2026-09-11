@@ -326,3 +326,16 @@ Not yet run. See `docs/live-loop.md`. Paste the `gate-report` output, the final
 
 Not yet run against a real transcript. Needs `docs/live-loop.md` to have produced
 `tests/fixtures/live_session_1.jsonl` and llama-server to be up.
+
+### Embedder load cost
+
+Measured on the development machine, Windows, CPU:
+
+| | first embed (cold) | subsequent embed |
+|---|---|---|
+| `BAAI/bge-small-en-v1.5` | 11863 ms | 21 ms |
+
+The cold load is now paid during `create_app` by `indexing.warm_store`, not on the first
+thing said at the table. See deviation P11 for why that mattered more than it looks: the
+cold load was longer than the whole follow-up window. Expect `familiar-brain serve` to
+take about twelve seconds longer to answer `/api/state` than it did in Plan 1.

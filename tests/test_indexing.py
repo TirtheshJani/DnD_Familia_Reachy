@@ -42,3 +42,38 @@ def test_homebrew_files_are_skipped_on_a_second_pass_too(tmp_path: Path):
     store = Store(tmp_path / "k.db", embedder=FakeEmbedder())
     assert index_notes(store, notes) == {"indexed": 2, "skipped": 0}
     assert index_notes(store, notes) == {"indexed": 0, "skipped": 2}
+
+
+class _SpyEmbedder:
+    dim = 64
+
+    def __init__(self):
+        self.calls = 0
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        self.calls += 1
+        return [[0.0] * self.dim for _ in texts]
+
+
+class _BrokenEmbedder:
+    dim = 64
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("no model on disk")
+
+
+def test_warm_store_loads_the_embedder_up_front(tmp_path: Path):
+    """Measured on this machine: 11.9 s for the first embed, 21 ms warm. Paid on the
+    first addressed turn that would blow the 2.5 s latency ceiling and expire the 8 s
+    follow-up window before the player's follow-up ever arrived."""
+    from familiar_brain.indexing import warm_store
+    spy = _SpyEmbedder()
+    warm_store(Store(tmp_path / "k.db", embedder=spy))
+    assert spy.calls == 1
+
+
+def test_warm_store_survives_an_embedder_that_cannot_load(tmp_path: Path):
+    """A missing model must not stop the brain from starting. Retrieval degrades to
+    nothing, which app.py already handles, and the table still gets its familiar."""
+    from familiar_brain.indexing import warm_store
+    warm_store(Store(tmp_path / "k.db", embedder=_BrokenEmbedder()))  # must not raise

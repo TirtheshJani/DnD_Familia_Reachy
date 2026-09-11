@@ -1,15 +1,24 @@
 import json
 from pathlib import Path
 import pytest
+from familiar_brain import indexing
 from familiar_brain.app import create_app
+from familiar_brain.retrieval import Store
+from tests.fakes.embedder import FakeEmbedder
 from tests.fakes.llm_server import FakeLLM
 
 FIX = Path(__file__).parent / "fixtures" / "mock_session.jsonl"
 
 
 @pytest.fixture
-def env(tmp_path: Path):
+def env(tmp_path: Path, monkeypatch):
     fake = FakeLLM()
+    # Without this the brain builds a real BgeEmbedder and the first addressed turn
+    # spends about twelve seconds loading it, which runs the clock past the follow-up
+    # window and makes this test fail on the follow-up row. No test should load a
+    # 130 MB model or depend on the network.
+    monkeypatch.setattr(indexing, "open_store",
+                        lambda cfg: Store(tmp_path / "k.db", embedder=FakeEmbedder()))
     persona = tmp_path / "persona.yaml"
     persona.write_text("name: Understudy\naliases: [understudy, little one]\ntts_speaker: Aiden\nmanner: dry\n")
     cfg = tmp_path / "brain.toml"

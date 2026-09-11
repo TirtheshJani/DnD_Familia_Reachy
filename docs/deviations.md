@@ -529,3 +529,45 @@ the file does not exist at all, because the service that writes it runs in WSL.
 so a null latency cannot be read as "latency was fine". Covered by
 `test_gate_report_says_so_when_the_brain_log_is_missing` and
 `test_gate_report_omits_the_missing_flag_when_the_log_is_there`.
+
+## P11. The embedder loads in 11.9 seconds, and it was loading on the first turn
+
+Found by running the suite one more time before merging, after the model had been
+downloaded. `tests/test_app_integration.py` started failing on its follow-up row with
+`assert 'idle_do_nothing' not in ['idle_do_nothing']` and a
+`retrieval failed: [Errno 2] No such file or directory` in the captured log.
+
+The cause was not the test. That fixture never monkeypatched `indexing.open_store`, so
+Task 10's wiring gave it a real `BgeEmbedder`, and `build_context` was loading the model
+inside the turn. Measured on this machine:
+
+| | first embed | warm embed |
+|---|---|---|
+| `BgeEmbedder` | 11863 ms | 21 ms |
+
+Twelve seconds inside an addressed turn is two things at once. It is far past the design
+section 11 ceiling of 2.5 s. More quietly, it is longer than the whole 8 s follow-up
+window, so the window opened by the naming turn had already closed by the time the
+player's follow-up arrived, the classifier judged it cold, and the familiar ignored it.
+That is the exact failure the test caught, on the first live turn of every session.
+
+Two fixes:
+
+- `indexing.warm_store(store)` forces the load, and `open_store` calls it, so the cost
+  is paid during `create_app`, behind the `/api/state` health check that
+  `scripts/start_all.sh` already waits on for up to 600 s. The health check now goes
+  green only when the brain can actually retrieve, which is the better contract anyway.
+  A warm-up failure is logged and swallowed: a brain that will not start is worse than
+  one with no memory. Covered by `test_warm_store_loads_the_embedder_up_front`,
+  `test_warm_store_survives_an_embedder_that_cannot_load`, and the slow
+  `test_open_store_returns_an_already_loaded_embedder`.
+- The Plan 1 integration fixture now monkeypatches `open_store` to a `FakeEmbedder`
+  store, as `tests/test_app_knowledge.py` already did. No test loads a 130 MB model or
+  touches the network. The default suite went from 26 s to 16 s as a side effect.
+
+Worth saying plainly: the earlier green suite was partly hollow. Retrieval was failing
+on every turn of that test and the `except Exception` in `_instructions` was swallowing
+it exactly as designed, so nothing looked wrong. The graceful degradation is right, but
+it means a silent retrieval failure is invisible from the test suite alone. The
+`retrieval_ms` mark in the brain log is what exposes it live, and
+`test_retrieval_is_timed_and_the_tools_are_offered` pins that the mark exists.

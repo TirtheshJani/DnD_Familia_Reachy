@@ -45,11 +45,33 @@ def index_notes(store: Store, notes_dir: Path) -> dict[str, int]:
     return {"indexed": indexed, "skipped": skipped}
 
 
+def warm_store(store: Store) -> None:
+    """Force the embedder to load now, so no turn at the table pays for it.
+
+    Measured on the development machine: 11.9 s for the first embed against 21 ms warm.
+    Spent on the first addressed turn instead, that load would put the turn far past the
+    design's 2.5 s ceiling and, worse, run the clock past the 8 s follow-up window, so
+    the player's natural follow-up would be judged by the classifier and ignored.
+
+    A failure here is logged and swallowed: a brain that will not start is worse than
+    one with no memory, and app.py already degrades an unusable store to no context.
+    """
+    try:
+        store.embedder.embed(["warm"])
+    except Exception as e:
+        log.warning("embedder warm-up failed, the first retrieval will pay for it: %s", e)
+
+
 def open_store(cfg) -> Store:
-    """The single seam the app and the CLI share, and the one the tests monkeypatch."""
+    """The single seam the app and the CLI share, and the one the tests monkeypatch.
+
+    Returns a store that is ready to search: the embedder is already loaded.
+    """
     from familiar_brain.embeddings import BgeEmbedder
     Path(cfg.knowledge.db_path).parent.mkdir(parents=True, exist_ok=True)
-    return Store(cfg.knowledge.db_path, embedder=BgeEmbedder())
+    store = Store(cfg.knowledge.db_path, embedder=BgeEmbedder())
+    warm_store(store)
+    return store
 
 
 def index_command(args) -> None:
