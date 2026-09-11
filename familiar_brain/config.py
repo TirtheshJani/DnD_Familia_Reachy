@@ -1,0 +1,48 @@
+from __future__ import annotations
+
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+
+
+@dataclass(frozen=True)
+class Server:
+    host: str
+    port: int
+
+
+@dataclass(frozen=True)
+class Upstream:
+    base_url: str
+    generate_slot: int
+    classify_slot: int
+    classify_timeout_s: float
+
+
+@dataclass(frozen=True)
+class Gate:
+    follow_up_window_s: float
+
+
+@dataclass(frozen=True)
+class Paths:
+    persona: str
+    sessions_dir: str
+
+
+@dataclass(frozen=True)
+class Config:
+    server: Server
+    upstream: Upstream
+    gate: Gate
+    paths: Paths
+
+
+def load_config(path: Path | str) -> Config:
+    raw = tomllib.loads(Path(path).read_text())
+    return Config(
+        server=Server(**raw["server"]),
+        upstream=Upstream(**raw["upstream"]),
+        gate=Gate(**raw["gate"]),
+        paths=Paths(**raw["paths"]),
+    )
