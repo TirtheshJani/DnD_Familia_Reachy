@@ -70,5 +70,12 @@ def render_system_prompt(p: Persona) -> str:
         "You never speak for the Dungeon Master, never narrate outcomes the DM has not stated, "
         "and never resolve a rules dispute; you may cite a rule and then defer to the DM.\n"
     )
+    # Measured, not assumed: without this line the model called the roll tool in 7 of 12
+    # live trials and made the number up in the rest. With it, 12 of 12. See
+    # docs/deviations.md section E.
+    tool_block = (
+        "When a die must be rolled, call the roll tool and report the total it returns "
+        "verbatim. Never invent or calculate a dice result yourself.\n"
+    )
     length_block = "Keep every reply to at most two spoken sentences unless explicitly asked for more."
-    return "\n\n".join([persona_block, off_limits_block + dm_block, length_block])
+    return "\n\n".join([persona_block, off_limits_block + dm_block + tool_block, length_block])

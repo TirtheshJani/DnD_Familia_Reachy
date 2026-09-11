@@ -79,6 +79,25 @@ def test_brain_tool_argument_frames_do_not_leak(fake):
     assert leaked == [], f"brain tool argument frames leaked to the client: {leaked}"
 
 
+def test_reasoning_effort_defaults_to_none_upstream(fake):
+    """Gemma 4 is a reasoning model. Left to itself it spends the token budget
+    thinking and then answers in prose instead of calling the tool, which both breaks
+    dice rolling and blows the latency ceiling. Measured against the live model:
+    reasoning effort none yields a bare function_call and no reasoning item."""
+    up = Upstream(base_url=fake.base_url, generate_slot=0, brain_tool_names=set())
+    list(up.stream({"input": [{"role": "user", "content": "hi"}], "stream": True}))
+    assert fake.requests[-1]["body"]["reasoning"] == {"effort": "none"}
+
+
+def test_explicit_reasoning_from_the_client_is_preserved(fake):
+    """speech-to-speech exposes --responses_api_reasoning_effort, so a caller that
+    sets it deliberately must win over the brain's default."""
+    up = Upstream(base_url=fake.base_url, generate_slot=0, brain_tool_names=set())
+    list(up.stream({"input": [{"role": "user", "content": "hi"}], "stream": True,
+                    "reasoning": {"effort": "medium"}}))
+    assert fake.requests[-1]["body"]["reasoning"] == {"effort": "medium"}
+
+
 def test_stream_always_terminates_with_completed(fake):
     """If the model keeps calling a brain tool until the round budget is spent, the
     client must still receive a terminating response.completed rather than a

@@ -1,7 +1,27 @@
+import logging
 import random
 import pytest
 from hypothesis import given, strategies as st
+from familiar_brain import tools
+from familiar_brain.tools import roll as roll_tool
 from familiar_brain.tools.roll import roll, RollError
+
+
+def test_registry_logs_every_tool_result(caplog):
+    """Without this there is no record of what the familiar actually rolled, so a
+    disputed result at the table cannot be audited afterwards."""
+    tools.register(roll_tool)
+    with caplog.at_level(logging.INFO, logger="familiar.tools"):
+        out = tools.run("roll", {"expression": "1d20"})
+    assert "Rolled 1d20" in out
+    logged = " ".join(r.getMessage() for r in caplog.records)
+    assert "roll" in logged and out.split(".")[0] in logged
+
+
+def test_registry_logs_unknown_tool(caplog):
+    with caplog.at_level(logging.WARNING, logger="familiar.tools"):
+        assert "Unknown tool" in tools.run("nope", {})
+    assert "nope" in " ".join(r.getMessage() for r in caplog.records)
 
 
 def rng(seed): return random.Random(seed)

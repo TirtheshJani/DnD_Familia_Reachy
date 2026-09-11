@@ -32,6 +32,9 @@ class LLMClient:
             "temperature": 0,
             "stream": False,
             "id_slot": self.classify_slot,
+            # Gemma 4 reasons before answering, which does not fit a one-token budget on
+            # a 600 ms timeout. Measured live: 286 ms with reasoning on, 59 ms with it off.
+            "reasoning_effort": "none",
         }
         r = requests.post(f"{self.base_url}/chat/completions", json=body, timeout=self.classify_timeout_s)
         r.raise_for_status()

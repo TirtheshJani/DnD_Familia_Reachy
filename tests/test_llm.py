@@ -17,6 +17,16 @@ def test_classify_parses_token_and_pins_slot(fake):
     assert body["id_slot"] == 1 and body["max_tokens"] <= 4 and body["stream"] is False
 
 
+def test_classify_disables_reasoning(fake):
+    """The classifier asks for one token on a 600 ms budget. Measured against the live
+    model, the same call took 286 ms with reasoning left on and 59 ms with it off, so
+    the margin against a contended slot is worth having."""
+    fake.chat_replies.append("AMBIENT")
+    c = LLMClient(base_url=fake.base_url, classify_slot=1, classify_timeout_s=1.0)
+    c.classify(["Natural twenty!"], persona_name="Understudy")
+    assert fake.requests[-1]["body"]["reasoning_effort"] == "none"
+
+
 def test_classify_unparseable_raises(fake):
     fake.chat_replies.append("well, maybe")
     c = LLMClient(base_url=fake.base_url, classify_slot=1, classify_timeout_s=1.0)

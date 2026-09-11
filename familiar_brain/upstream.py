@@ -17,15 +17,28 @@ log = logging.getLogger("familiar.upstream")
 
 
 class Upstream:
-    def __init__(self, *, base_url: str, generate_slot: int, brain_tool_names: set[str], timeout_s: float = 60.0):
+    def __init__(self, *, base_url: str, generate_slot: int, brain_tool_names: set[str], timeout_s: float = 60.0,
+                 reasoning_effort: str | None = "none"):
         self.base_url = base_url.rstrip("/")
         self.generate_slot = generate_slot
         self.brain_tool_names = brain_tool_names
         self.timeout_s = timeout_s
+        self.reasoning_effort = reasoning_effort
+
+    def _with_defaults(self, body: dict, *, stream: bool) -> dict:
+        """Gemma 4 is a reasoning model. Left alone it spends the output budget on a
+        reasoning item and then answers in prose rather than emitting the function_call,
+        so the dice never actually roll and the turn misses the latency ceiling. A
+        caller that sets reasoning itself, via --responses_api_reasoning_effort, wins.
+        """
+        out = {**body, "stream": stream, "id_slot": self.generate_slot}
+        if self.reasoning_effort is not None:
+            out.setdefault("reasoning", {"effort": self.reasoning_effort})
+        return out
 
     def _post(self, body: dict) -> requests.Response:
-        body = {**body, "stream": True, "id_slot": self.generate_slot}
-        r = requests.post(f"{self.base_url}/responses", json=body, stream=True, timeout=self.timeout_s)
+        r = requests.post(f"{self.base_url}/responses", json=self._with_defaults(body, stream=True),
+                          stream=True, timeout=self.timeout_s)
         r.raise_for_status()
         return r
 
@@ -35,7 +48,7 @@ class Upstream:
         Used for the client's warmup probe and history compaction. Neither declares
         tools, so no brain-side tool round trip is attempted on this path.
         """
-        body = {**copy.deepcopy(req), "stream": False, "id_slot": self.generate_slot}
+        body = self._with_defaults(copy.deepcopy(req), stream=False)
         r = requests.post(f"{self.base_url}/responses", json=body, timeout=self.timeout_s)
         r.raise_for_status()
         return r.json()
