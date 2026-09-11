@@ -36,7 +36,7 @@ trap cleanup EXIT INT TERM
 # First run downloads several GB, so allow a long wait here.
 wait_for http://127.0.0.1:8080/health llama-server
 
-uv run --project "$REPO" familiar-brain config/brain.toml > data/brain.log 2>&1 &
+uv run --project "$REPO" familiar-brain serve config/brain.toml > data/brain.log 2>&1 &
 wait_for http://127.0.0.1:8090/api/state familiar-brain
 
 # The ggml TTS backend (qwentts-cpp) is built against CUDA 12 and dlopens

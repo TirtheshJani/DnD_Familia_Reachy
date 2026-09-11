@@ -7,17 +7,23 @@ dependencies = [
   "flask>=3.0,<4",
   "requests>=2.32",
   "pyyaml>=6.0",
+  "sentence-transformers>=3.0",
+  "sqlite-vec>=0.1.6",
+  "pymupdf>=1.24",
+  "numpy>=1.26",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "hypothesis>=6", "pytest-timeout>=2"]
 
 [project.scripts]
-familiar-brain = "familiar_brain.app:main"
+familiar-brain = "familiar_brain.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 timeout = 20
+markers = ["slow: needs a model download"]
+addopts = "-m 'not slow'"
 
 [build-system]
 requires = ["hatchling"]
