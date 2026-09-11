@@ -1,0 +1,96 @@
+from __future__ import annotations
+
+import copy
+import json
+import logging
+import uuid
+from typing import Iterator
+
+import requests
+
+from familiar_brain import tools
+from familiar_brain.responses_api import sse
+
+MAX_TOOL_ROUNDS = 3
+
+log = logging.getLogger("familiar.upstream")
+
+
+class Upstream:
+    def __init__(self, *, base_url: str, generate_slot: int, brain_tool_names: set[str], timeout_s: float = 60.0):
+        self.base_url = base_url.rstrip("/")
+        self.generate_slot = generate_slot
+        self.brain_tool_names = brain_tool_names
+        self.timeout_s = timeout_s
+
+    def _post(self, body: dict) -> requests.Response:
+        body = {**body, "stream": True, "id_slot": self.generate_slot}
+        r = requests.post(f"{self.base_url}/responses", json=body, stream=True, timeout=self.timeout_s)
+        r.raise_for_status()
+        return r
+
+    @staticmethod
+    def _iter_events(resp: requests.Response) -> Iterator[dict]:
+        buf = ""
+        for line in resp.iter_lines(decode_unicode=True):
+            if line is None:
+                continue
+            if line == "":
+                if buf:
+                    for l in buf.splitlines():
+                        if l.startswith("data: "):
+                            yield json.loads(l[6:])
+                    buf = ""
+            else:
+                buf += line + "\n"
+
+    def stream(self, req: dict) -> Iterator[str]:
+        """Yield SSE frames for the client. Brain tools are executed here and hidden from the client."""
+        body = copy.deepcopy(req)
+        last_response_id: str | None = None
+        for _round in range(MAX_TOOL_ROUNDS + 1):
+            pending: list[dict] = []
+            # Argument frames for a brain tool reference their item by item_id and carry
+            # no nested item, so the item-shaped check below cannot see them. Collect the
+            # ids as the items are announced and suppress anything pointing at them.
+            hidden_item_ids: set[str] = set()
+            for ev in self._iter_events(self._post(body)):
+                etype = ev["type"]
+                item = ev.get("item") or {}
+                rid = (ev.get("response") or {}).get("id")
+                if rid:
+                    last_response_id = rid
+                if item.get("type") == "function_call" and item.get("name") in self.brain_tool_names:
+                    if item.get("id"):
+                        hidden_item_ids.add(item["id"])
+                    if etype == "response.output_item.done":
+                        pending.append(item)
+                    continue  # hide brain tool events from the client
+                if ev.get("item_id") in hidden_item_ids:
+                    continue
+                if etype == "response.completed":
+                    if pending:
+                        break  # do not forward completion yet; we have a round trip to do
+                    yield sse(ev)
+                    return
+                yield sse(ev)
+            if not pending:
+                return
+            for item in pending:
+                try:
+                    args = json.loads(item.get("arguments") or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                output = tools.run(item["name"], args)
+                body["input"] = list(body.get("input") or []) + [
+                    {"type": "function_call", "call_id": item["call_id"], "name": item["name"], "arguments": item.get("arguments") or "{}"},
+                    {"type": "function_call_output", "call_id": item["call_id"], "output": output},
+                ]
+        # The round budget is spent and the model is still asking for tools. Close the
+        # stream cleanly rather than leaving the client on a truncated response.
+        log.warning("tool round budget of %d exhausted; terminating the stream", MAX_TOOL_ROUNDS)
+        yield sse({
+            "type": "response.completed",
+            "response": {"id": last_response_id or f"resp_{uuid.uuid4().hex[:12]}",
+                         "status": "completed", "output": []},
+        })
