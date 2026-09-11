@@ -102,3 +102,47 @@ def test_reindex_endpoint_reports_counts(env):
     client, _, _, tmp = env
     (tmp / "notes" / "pc.md").write_text("# PC\nDocks of Nephria.\n")
     assert client.post("/api/reindex").get_json() == {"indexed": 1, "skipped": 0}
+
+
+def _wait_for(path: Path, tries: int = 60) -> bool:
+    import time
+    for _ in range(tries):
+        if path.exists():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_session_end_summarises_in_the_background(env):
+    client, fake, _, tmp = env
+    sid = client.post("/api/session/start").get_json()["session"]
+    _addressed(client, "Understudy, the cistern is dark")
+    fake.chat_replies.append("## Scenes\n- The cistern\n## NPCs met\n- none\n")
+    body = client.post("/api/session/end").get_json()
+    assert body["summarising"] is True
+    summary = tmp / "sessions" / f"{sid}.summary.md"
+    assert _wait_for(summary), "the summariser thread never wrote the summary"
+    assert "cistern" in summary.read_text()
+
+
+def test_sessions_listing_then_purge(env):
+    client, fake, store, tmp = env
+    sid = client.post("/api/session/start").get_json()["session"]
+    _addressed(client, "Understudy, the cistern is dark")
+    fake.chat_replies.append("## Scenes\n- The cistern\n")
+    client.post("/api/session/end")
+    assert _wait_for(tmp / "sessions" / f"{sid}.summary.md")
+
+    listed = client.get("/api/sessions").get_json()["sessions"]
+    assert {"id": sid, "summary": True, "raw": True} in listed
+
+    assert client.delete(f"/api/session/{sid}").get_json() == {"purged": True}
+    assert not (tmp / "sessions" / f"{sid}.jsonl").exists()
+    assert not (tmp / "sessions" / f"{sid}.summary.md").exists()
+    assert store.search("cistern", corpus="sessions", k=3) == []
+    assert client.get("/api/sessions").get_json()["sessions"] == []
+
+
+def test_purge_of_an_unknown_session_is_false(env):
+    client, _, _, _ = env
+    assert client.delete("/api/session/nope").get_json() == {"purged": False}

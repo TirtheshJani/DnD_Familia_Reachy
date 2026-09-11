@@ -30,10 +30,25 @@ CLASSIFY_INSTRUCTION = (
 
 
 class LLMClient:
-    def __init__(self, *, base_url: str, classify_slot: int, classify_timeout_s: float):
+    def __init__(self, *, base_url: str, classify_slot: int, classify_timeout_s: float,
+                 generate_slot: int = 0):
         self.base_url = base_url.rstrip("/")
         self.classify_slot = classify_slot
         self.classify_timeout_s = classify_timeout_s
+        self.generate_slot = generate_slot
+
+    def complete(self, messages: list[dict], max_tokens: int = 1200) -> str:
+        """One non-streaming completion on the generate slot, for the session summariser.
+
+        No timeout as tight as classify's: this runs in a background thread after the
+        session has ended, so a slow answer costs nobody anything. reasoning_effort is
+        none for the same reason it is on classify, see docs/deviations.md E2.
+        """
+        body = {"messages": messages, "max_tokens": max_tokens, "temperature": 0.2,
+                "stream": False, "id_slot": self.generate_slot, "reasoning_effort": "none"}
+        r = requests.post(f"{self.base_url}/chat/completions", json=body, timeout=300)
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]
 
     def classify(self, segments: Sequence[str], *, persona_name: str) -> Decision:
         # Only the last line. Design 5 layer 3 calls for the last four segments, but

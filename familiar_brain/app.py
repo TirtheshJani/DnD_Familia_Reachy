@@ -22,6 +22,7 @@ from familiar_brain.responses_api import (
     with_instructions_and_tools,
 )
 from familiar_brain.session import SessionLog
+from familiar_brain.summariser import apply_retention, purge_session, summarise_in_background
 from familiar_brain.state import BrainState
 from familiar_brain.timing import TurnTimer
 from familiar_brain.tools import (
@@ -72,7 +73,8 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
     state = BrainState()
     log = SessionLog(cfg.paths.sessions_dir)
     llm = LLMClient(base_url=cfg.upstream.base_url, classify_slot=cfg.upstream.classify_slot,
-                    classify_timeout_s=cfg.upstream.classify_timeout_s)
+                    classify_timeout_s=cfg.upstream.classify_timeout_s,
+                    generate_slot=cfg.upstream.generate_slot)
     gate = Gate(state=state, name=persona.name, aliases=persona.aliases,
                 follow_up_window_s=cfg.gate.follow_up_window_s,
                 max_follow_ups=cfg.gate.max_follow_ups,
@@ -86,6 +88,8 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
     note_tool.bind(log)
     lookup_tool.bind(store)
     recall_tool.bind(store)
+    sessions_dir = Path(cfg.paths.sessions_dir)
+    apply_retention(sessions_dir, store=store, retention_days=cfg.knowledge.retention_days)
     upstream = Upstream(base_url=cfg.upstream.base_url, generate_slot=cfg.upstream.generate_slot,
                         brain_tool_names={s["name"] for s in tools.specs()})
 
@@ -211,7 +215,20 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
     def api_session_end():
         if log.active_id is None:  # SessionLog.path would raise, which Flask turns into a 500
             return jsonify(error="no active session"), 409
-        return jsonify(path=str(log.end()))
+        path = log.end()
+        summarise_in_background(path, store=store, llm=llm)
+        return jsonify(path=str(path), summarising=True)
+
+    @app.delete("/api/session/<sid>")
+    def api_session_purge(sid: str):
+        return jsonify(purged=purge_session(sessions_dir, sid, store=store))
+
+    @app.get("/api/sessions")
+    def api_sessions():
+        ids = sorted({p.stem.replace(".summary", "") for p in sessions_dir.glob("*")})
+        return jsonify(sessions=[{"id": i,
+                                  "summary": (sessions_dir / f"{i}.summary.md").exists(),
+                                  "raw": (sessions_dir / f"{i}.jsonl").exists()} for i in ids])
 
     return app
 
