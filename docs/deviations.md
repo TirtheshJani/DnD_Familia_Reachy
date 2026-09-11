@@ -1,8 +1,8 @@
 # Deviations from Plan 1
 
 Every departure from `plans/2026-09-10-reachy-familiar-plan-1-core.md`, with the reason
-and where to check it. Plan 1's own test total was 49; the suite now runs 64, the extra
-15 being the tests that cover the defects below. Sections A to C came from reading the
+and where to check it. Plan 1's own test total was 49; the suite now runs 67, the extra
+18 being the tests that cover the defects below. Sections A to C came from reading the
 plan and the installed packages; section E came from running the real stack.
 
 ## A. Defects found in the plan's code

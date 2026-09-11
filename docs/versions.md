@@ -113,7 +113,20 @@ New-NetFirewallHyperVRule -Name "WSL-s2s-8765" -DisplayName "speech-to-speech 87
 ```
 
 Confirm afterwards from another device on the LAN:
-`curl -v telnet://10.0.0.168:8765` should connect rather than hang.
+`curl -v telnet://<host-lan-ip>:8765` should connect rather than hang.
+
+### The host LAN address moves
+
+It was 10.0.0.168 at the start of this session and 10.0.0.95 by the end, because the
+address comes from DHCP and mirrored mode hands the distro whatever the host has.
+Whatever the robot's connection URL is pointed at will therefore go stale on a lease
+change. Either reserve a lease for the laptop on the router, or re-read the address
+from `./scripts/check_env.sh` before a session and update the robot.
+
+Note also that WSL has no mDNS resolver, so `reachy-mini.local` fails from inside the
+distro even while resolving fine from Windows. Use the robot's address there, or pass
+`ROBOT_HOST=<ip>` to `check_env.sh`. The robot was reachable throughout at
+`10.0.0.100:8000` (`reachy_mini`, firmware 1.10.0).
 
 ## Working commands
 

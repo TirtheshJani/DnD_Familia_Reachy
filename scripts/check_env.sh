@@ -81,7 +81,11 @@ if curl -sf --max-time 5 "http://${ROBOT_HOST}:8000/api/daemon/status" >/dev/nul
     | python3 -c "import json,sys; d=json.load(sys.stdin); print('  name=%s version=%s wlan_ip=%s state=%s' % (d.get('robot_name'), d.get('version'), d.get('wlan_ip'), d.get('state')))" 2>/dev/null \
     || echo "  reachable but status unparseable"
 else
-  echo "  robot not reachable at ${ROBOT_HOST}:8000 (not fatal for unit tests)"
+  echo "  not reachable at ${ROBOT_HOST}:8000 (not fatal for unit tests)"
+  # WSL has no mDNS resolver, so reachy-mini.local fails here even when the robot is
+  # up and the same name resolves fine from Windows. Installing libnss-mdns needs
+  # sudo, so the practical answer is to pass the address.
+  echo "  if the robot is on, retry with its address: ROBOT_HOST=10.0.0.100 ./scripts/check_env.sh"
 fi
 
 echo
