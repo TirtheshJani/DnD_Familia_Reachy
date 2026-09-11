@@ -23,9 +23,13 @@ RTX 4080 Laptop 12282 MiB, Windows 11 build 26200, WSL2 Ubuntu 24.04.
 | uv | 0.12.13 | |
 | reachy_mini daemon | 1.10.0, wireless, hardware id `3ce93bd07b69ca28` | `GET /api/daemon/status` |
 
-Quantisation note: `-hf ...GGUF` with no suffix resolves to **Q8_0 (8.03 GB)**, which
-does not leave room for Parakeet and Qwen3-TTS on a 12 GB card. The suffix `:Q4_0`
-(4.59 GB) is deliberate, not incidental. Do not drop it.
+Two flags on the llama-server line are load-bearing and easy to lose in a tidy-up:
+
+- **`:Q4_0`.** `-hf ...GGUF` with no suffix resolves to Q8_0 at 8.03 GB, which does not
+  leave room for Parakeet and Qwen3-TTS on a 12 GB card. Q4_0 is 4.59 GB.
+- **`--jinja`.** Without it llama-server ignores the `tools` array completely and
+  returns `tool_calls: null`, so `roll`, `initiative` and `note` can never fire. Verified
+  both ways against the live server.
 
 ## Install, without sudo
 
@@ -119,7 +123,7 @@ Confirm afterwards from another device on the LAN:
 
 # or individually
 ~/miniforge3/envs/llama/bin/llama-server -hf ggml-org/gemma-4-E4B-it-GGUF:Q4_0 \
-  -np 2 -c 32768 -fa on --swa-full --port 8080 --host 127.0.0.1
+  -np 2 -c 32768 -fa on --swa-full --jinja --port 8080 --host 127.0.0.1
 
 UV_PROJECT_ENVIRONMENT=~/.venvs/brain uv run familiar-brain config/brain.toml
 
@@ -139,21 +143,46 @@ Note there is no `--mode realtime`; `serve` is the realtime server in 1.0.0. See
 VRAM, measured with `nvidia-smi --query-gpu=memory.used --format=csv,noheader`
 against the 12282 MiB total:
 
-| State | VRAM used |
-|---|---|
-| idle, nothing loaded | 731 MiB |
-| Parakeet only | 2473 MiB |
-| full stack idle | TBD |
-| full stack while speaking | TBD |
+| State | VRAM used | of 12282 MiB |
+|---|---|---|
+| idle, nothing loaded | 731 MiB | 6 percent |
+| Parakeet only | 2473 MiB | 20 percent |
+| Gemma Q4_0 plus Parakeet | 8201 MiB | 67 percent |
+| full stack, all three models resident | 11540 MiB | 94 percent |
+
+Only about 740 MiB of headroom remains. Anything added later, the SmolVLM2 path in
+particular, will not fit; Plan 3 should use the Gemma mmproj rather than a second
+vision model, and the design document's documented fallback of the 0.6B TTS is the
+lever to pull if more room is needed.
 
 Turn latency, from `timing.py` lines in `data/brain.log`. Target 1.5 s from end of
 speech to first audio, ceiling 2.5 s.
 
-| Path | total_ms |
+Before and after defaulting reasoning effort to none, same four turns, same machine:
+
+| Path | before | after |
+|---|---|---|
+| IGNORE, gate only, no generation | 1943 ms | 1387 ms |
+| ADDRESSED by name, first token | 9278 ms | 183 ms |
+| ADDRESSED by name, total | 9780 ms | 620 ms |
+| follow-up inside the window, total | 8557 ms | 505 ms |
+| ADDRESSED with a dice roll, total | 2727 ms | 218 to 1216 ms |
+
+The 1.5 s target is met on every addressed path, including turns that execute a tool
+and therefore run two generations. The IGNORE path is dominated by the layer 3
+classifier, which is the one place still worth tuning: it is a network call the gate
+makes before deciding to stay silent.
+
+Gate classifier, one token on slot two:
+
+| Variant | latency |
 |---|---|
-| IGNORE (no model call) | TBD |
-| ADDRESSED, no tool | TBD |
-| ADDRESSED, with a dice roll | TBD |
+| as shipped, reasoning on | 286 ms |
+| reasoning_effort none (now the default) | 59 ms |
+
+The configured `classify_timeout_s` is 0.6, which was being exceeded whenever the
+slot was cold or contended, silently forcing every decision to IGNORE. At 59 ms the
+margin is now roughly tenfold.
 
 ## Contract verification
 
@@ -161,3 +190,19 @@ speech to first audio, ceiling 2.5 s.
 speech-to-speech uses, passes all ten checks: the non-streaming warmup body parses as
 a `Response`, and an unaddressed line yields exactly one `idle_do_nothing` tool call
 with a `call_`-prefixed id and zero spoken text.
+
+Stronger still, the real pipeline started: speech-to-speech reached `Application
+startup complete` and served `ws://0.0.0.0:8765/v1/realtime`, which it can only do
+after its non-streaming warmup probe gets a valid `Response` back from the brain.
+
+Dice, four consecutive live turns, from the brain's INFO log beside what was spoken:
+
+| tool result | spoken |
+|---|---|
+| `dice [9, 16], kept [16], total 16` | "The result of your roll with advantage is 16." |
+| `dice [2, 11], kept [11], total 11` | "The result is eleven." |
+| `dice [2, 1], kept [2], total 2` | "The result is 2." |
+| `dice [15, 3], kept [15], total 15` | "The result of your roll is 15." |
+
+Every spoken number matches the tool's total, advantage keeps the higher of two dice,
+and no brain-side tool call reached the client.

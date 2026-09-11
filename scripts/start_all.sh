@@ -28,7 +28,10 @@ wait_for() {
 cleanup() { echo "stopping children"; kill 0 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 
-"$LLAMA_BIN" -hf "$MODEL" -np 2 -c 32768 -fa on --swa-full --port 8080 --host 127.0.0.1 \
+# --jinja is load-bearing: without it llama-server ignores the tools array entirely and
+# returns tool_calls: null, so roll, initiative and note can never fire. The :Q4_0
+# suffix is equally deliberate, see docs/versions.md.
+"$LLAMA_BIN" -hf "$MODEL" -np 2 -c 32768 -fa on --swa-full --jinja --port 8080 --host 127.0.0.1 \
   > data/llama.log 2>&1 &
 # First run downloads several GB, so allow a long wait here.
 wait_for http://127.0.0.1:8080/health llama-server

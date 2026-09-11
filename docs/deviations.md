@@ -174,3 +174,72 @@ installed packages rather than by guessing:
 Also newly available and worth considering in a later plan: `/api/media/wobbling/{enable,disable}`
 for idle liveliness, and speech-to-speech's `--smart_turn` turn detector, which may
 do better than a fixed VAD threshold at a noisy table.
+
+## E. Found by running the real stack, not by reading it
+
+These only surfaced once Gemma, Parakeet and Qwen3-TTS were actually running. Each
+change below is backed by a measurement recorded in [versions.md](docs/versions.md).
+
+### E1. `--jinja` is required or no tool can ever fire
+
+Without it llama-server ignores the `tools` array entirely and returns
+`tool_calls: null` with empty content, despite the model's own chat template
+declaring tool support. Verified both ways against the live server. Added to
+`scripts/start_all.sh` with a comment, because a future tidy-up that drops it would
+silently disable `roll`, `initiative` and `note` rather than fail loudly.
+
+Related, and worth knowing: llama.cpp's `/v1/responses` accepts only the **flat**
+Responses-style tool schema. The nested Chat-Completions shape returns HTTP 500,
+`Failed to parse tools: key 'name' not found`. The brain already sent the flat form,
+so no change was needed, but the error message is unhelpful enough to record.
+
+### E2. Gemma 4 is a reasoning model, which broke both latency and tool use
+
+Left alone it emits a `reasoning` output item before anything else, spending the
+output budget thinking and then answering in prose. Two consequences, both fixed by
+defaulting `reasoning: {"effort": "none"}` on upstream requests:
+
+| | before | after |
+|---|---|---|
+| addressed turn, first token | 9278 ms | 183 ms |
+| addressed turn, total | 9780 ms | 620 ms |
+| follow-up turn, total | 8557 ms | 505 ms |
+
+The design document's latency ceiling is 2.5 s with a 1.5 s target. Before this the
+brain missed the ceiling by roughly 4x; after it, every addressed path including
+tool round trips lands under a second. A client that sets `reasoning` itself, via
+speech-to-speech's `--responses_api_reasoning_effort`, still wins.
+
+### E3. The familiar invented dice results 5 times in 12
+
+With the persona as the plan shipped it, the model called the `roll` tool in only
+**7 of 12** live trials and made a number up in the other five. Design 4.5 says the
+tool does all arithmetic and the model reports its total verbatim, so this is a
+correctness failure, not a style one, and a bad one for a table that has to trust
+the thing.
+
+Adding a tool-use line to the **non-overridable** fixed blocks in `persona.py` took
+it to **12 of 12**. It sits in the fixed blocks rather than `persona.yaml` precisely
+so a future persona cannot delete it. Temperature 0 was also tried and added nothing
+over the instruction.
+
+Confirmed end to end afterwards: four consecutive dice turns, every spoken number
+matching the tool's own total, advantage correctly keeping the higher of two dice.
+
+### E4. Nothing recorded what the familiar actually rolled
+
+The tool registry executed tools and returned the result to the model, but logged
+nothing, so there was no way to audit a disputed roll after the fact. It now logs
+every call and result at INFO. This also exposed that my first attempt at verifying
+dice execution, grepping the brain log, was checking for something the code never
+wrote. The registry now writes it.
+
+### E5. The gate classifier was timing out on every turn
+
+`classify_timeout_s` is 0.6 and the classifier call was taking about 286 ms warm but
+exceeding the budget whenever slot two was cold or contended, which silently forced
+every layer 3 decision to IGNORE. That is the designed fail-safe, so nothing looked
+broken, but AMBIENT could never fire and an addressed line that omitted the name was
+always missed. Adding `reasoning_effort: none` to the classify body took it to 59 ms,
+about a tenfold margin. The timeout value itself is left alone for the Plan 4 tuning
+pass.

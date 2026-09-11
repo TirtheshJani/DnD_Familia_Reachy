@@ -135,6 +135,31 @@ See `docs/versions.md` for the exact working command.
 
 ## Live capture
 
-Pending. Run `scripts/capture_protocol.py` between speech-to-speech and
-llama-server, speak one line at the robot, then record here what the captured
-request and stream contain, and reconcile any difference against sections 2 to 6.
+Done. `scripts/capture_protocol.py` was run between the brain and llama-server while
+a real addressed turn went through, producing `tests/fixtures/captured_request.json`
+and `tests/fixtures/captured_stream.sse`.
+
+The captured request the brain sends upstream:
+
+```
+keys        : id_slot, input, instructions, model, reasoning, stream, tools
+stream      : True
+reasoning   : {"effort": "none"}
+id_slot     : 0
+tools       : function/roll, function/initiative, function/note   (flat schema)
+instructions: the rendered persona, fixed blocks included
+input       : [{"type":"message","role":"user","content":[{"type":"input_text", ...}]}]
+```
+
+Reconciliation against sections 2 to 6: no discrepancies. The flat tool schema is
+confirmed to be the only one llama.cpp accepts on this endpoint (the nested
+Chat-Completions shape returns HTTP 500). The input item shape matches section 6.
+
+The captured stream for a tool-calling turn contains, in order:
+`response.created`, `response.in_progress`, `response.output_item.added`,
+sixteen `response.function_call_arguments.delta` events,
+`response.output_item.done`, `response.completed`.
+
+Those sixteen delta events are the concrete evidence behind deviation A2: they carry
+`item_id` and no nested `item`, so the plan's item-shaped hide check let every one of
+them through to the robot.
