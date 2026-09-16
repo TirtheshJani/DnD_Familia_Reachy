@@ -140,6 +140,11 @@ def rocky():
     "The ground is rocky, so watch your step",
     "Rocky terrain slows you down",
     "a rocky start to the negotiations",
+    "Rocky ground slows you down",
+    "Rocky terrain ahead",
+    "the rocky pass is steep",
+    "the road is too rocky to cross",
+    "a very rocky path",
 ])
 def test_rocky_the_adjective_is_not_a_naming(line):
     st, g, seen = rocky()
@@ -160,6 +165,17 @@ def test_rocky_the_adjective_is_not_a_naming(line):
     "Rocky's turn to guess",
     "good boy Rocky",
     "Rocky, is the path rocky?",
+    # The transcriber drops the comma after a name.
+    "Rocky pass me the dice",
+    "Rocky start initiative",
+    "Rocky start a note",
+    "Rocky pass the salt",
+    "Rocky trail us, we need to go",
+    "Okay. Rocky pass me the dice",
+    "Hey Rocky pass me the dice",
+    "okay Rocky start initiative",
+    "Me too Rocky",
+    "me too, Rocky!",
 ])
 def test_rocky_spoken_to_or_about_is_a_naming(line):
     st, g, seen = rocky()
