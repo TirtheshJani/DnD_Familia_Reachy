@@ -54,10 +54,23 @@ def load_persona(path: Path | str) -> Persona:
     )
 
 
-def render_system_prompt(p: Persona, context: str = "") -> str:
+LENGTH_BLOCKS = {
+    "familiar": "Keep every reply to at most two spoken sentences unless explicitly asked for more.",
+    "thinking": (
+        "The speaker has asked you to think alongside them. Reason out loud in plain spoken "
+        "language, up to six sentences: name the options you see, say which you favour and why, "
+        "and finish with one question back or one concrete suggestion. Stay in character; you "
+        "are still a creature, not a consultant."
+    ),
+}
+
+
+def render_system_prompt(p: Persona, context: str = "", mode: str = "familiar") -> str:
     """`context` is the retrieved "What you know" block, or "" on a turn with nothing
     retrieved. It goes first, before the persona, so the model reads the facts it has
-    been handed before it is told how to speak."""
+    been handed before it is told how to speak.
+
+    `mode` selects the length block; an unknown mode falls back to "familiar"."""
     persona_block = (
         f"You are {p.name}, a familiar bound to a player character at a tabletop game of Dungeons & Dragons "
         f"set in the city of Nephria, an Art Deco noir setting. You are a creature, not an assistant.\n"
@@ -80,6 +93,13 @@ def render_system_prompt(p: Persona, context: str = "") -> str:
         "When a die must be rolled, call the roll tool and report the total it returns "
         "verbatim. Never invent or calculate a dice result yourself.\n"
     )
-    length_block = "Keep every reply to at most two spoken sentences unless explicitly asked for more."
-    prompt = "\n\n".join([persona_block, off_limits_block + dm_block + tool_block, length_block])
+    sight_block = (
+        "You have a camera. When asked what you see, who is at the table, how many people there "
+        "are, what someone is holding, or to read dice or a card, call the camera tool with a "
+        "short question, then describe only what the picture shows. Never name or identify a "
+        "person; say 'the one on your left' or 'the person holding the cards'. If the picture is "
+        "unclear, say so rather than guess.\n"
+    )
+    length_block = LENGTH_BLOCKS.get(mode, LENGTH_BLOCKS["familiar"])
+    prompt = "\n\n".join([persona_block, off_limits_block + dm_block + tool_block + sight_block, length_block])
     return f"{context}\n\n{prompt}" if context else prompt

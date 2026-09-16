@@ -68,3 +68,19 @@ def test_shipped_example_persona_is_rocky_with_intent_gestures():
         assert arg in intents, f"{mood} uses {arg!r}, not an app emotion intent"
     for mood in ("attentive", "amused", "alarmed", "thoughtful", "proud", "sad", "scared", "asleep", "awake"):
         assert mood in per.gestures, mood
+
+
+def test_sight_block_is_fixed_and_forbids_identifying_people(tmp_path: Path):
+    p = tmp_path / "persona.yaml"; p.write_text(GOOD)
+    prompt = render_system_prompt(load_persona(p))
+    assert "camera tool" in prompt and "Never name or identify a person" in prompt
+
+
+def test_thinking_mode_changes_only_the_length_block(tmp_path: Path):
+    p = tmp_path / "persona.yaml"; p.write_text(GOOD)
+    per = load_persona(p)
+    default, thinking = render_system_prompt(per), render_system_prompt(per, mode="thinking")
+    assert default.endswith("two spoken sentences unless explicitly asked for more.")
+    assert "up to six sentences" in thinking and "two spoken sentences" not in thinking
+    assert default.rsplit("\n\n", 1)[0] == thinking.rsplit("\n\n", 1)[0]
+    assert render_system_prompt(per, mode="nonsense") == default
