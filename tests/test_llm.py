@@ -79,3 +79,13 @@ def test_reaction_prompt_is_selectable_and_none_is_a_valid_answer(fake):
     assert "not spoken to it" in content and "Most lines are none" in content
     fake.chat_replies.append("Alarmed")
     assert c.mood("The priest pulls back his hood: it is the king.", moods=moods, prompt=REACTION_INSTRUCTION) == "alarmed"
+
+
+def test_mood_reads_the_first_word_and_never_turns_a_negation_into_a_gesture(fake):
+    from familiar_brain.llm import REACTION_INSTRUCTION
+    c = LLMClient(base_url=fake.base_url, classify_slot=1, classify_timeout_s=1.0)
+    moods = ("amused", "alarmed", "sad", "scared", "none")
+    for reply, want in [("**Sad**", "sad"), ("alarmed: a shocking", "alarmed"), ("Sad\n\nThe line", "sad"),
+                        ("not sad", None), ("no reaction", None), ("Sadly, none", None), ("", None)]:
+        fake.chat_replies.append(reply)
+        assert c.mood("x", moods=moods, prompt=REACTION_INSTRUCTION) == want, reply

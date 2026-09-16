@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
+import re
 from typing import Sequence
 
 import requests
 
 from familiar_brain.gate import Decision
+
+log = logging.getLogger("familiar.llm")
 
 # Scored against twelve labelled lines of table talk on the live model. The plan's
 # original wording got 7 of 12, reading Dungeon Master narration such as "You see a
@@ -49,6 +53,10 @@ REACTION_INSTRUCTION = (
     "none: ordinary description, travel, rules talk, dice, table logistics.\n"
     "Most lines are none."
 )
+
+# First run of letters, whole word: "**Sad**" and "alarmed: a shocking" parse, while
+# "not sad", "no reaction" and "Sadly, none" do not (their first word is not a mood).
+_MOOD_WORD = re.compile(r"[a-z]+")
 
 
 class LLMClient:
@@ -105,9 +113,11 @@ class LLMClient:
 
         Same slot, budget and reasoning setting as classify: 59 ms measured live for one
         token with reasoning off (docs/versions.md, gate classifier table; docs/deviations.md
-        E5). `prompt` selects the instruction; motion.py uses MOOD_INSTRUCTION for addressed
-        turns and REACTION_INSTRUCTION for table lines. Returns None for anything outside
-        the list so the caller falls back to its keyword rules.
+        E5). `prompt` selects the instruction; app.py passes MOOD_INSTRUCTION to the
+        Choreographer's mood classifier for addressed turns and REACTION_INSTRUCTION to its
+        reaction classifier for table lines. The first word of the answer must equal a
+        listed mood, so mood keys must be single lowercase words. Returns None for anything
+        else, and logs the raw answer, so the caller falls back to its keyword rules.
         """
         body = {
             "messages": [
@@ -122,5 +132,9 @@ class LLMClient:
         }
         r = requests.post(f"{self.base_url}/chat/completions", json=body, timeout=self.classify_timeout_s)
         r.raise_for_status()
-        word = r.json()["choices"][0]["message"]["content"].strip().lower().strip(".,!\"'")
+        answer = r.json()["choices"][0]["message"]["content"]
+        m = _MOOD_WORD.search(answer.lower())
+        word = m.group() if m else ""
+        if word not in moods:
+            log.info("mood answer not in list, ignored: %r", answer)
         return word if word in moods else None
