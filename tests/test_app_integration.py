@@ -348,3 +348,24 @@ def test_an_addressed_turn_that_came_back_without_words_is_asked_again(env):
     assert "response.output_text.delta" in _types(resp)
     assert len([r for r in fake.requests if r["path"].endswith("/responses")]) == 2
     assert app.extensions["brain_state"].last_spoke_at is not None
+
+
+@pytest.mark.parametrize("route", ["/api/mute", "/api/mute_and_stop_logging"])
+def test_a_mute_closes_the_follow_up_window(env, route):
+    """Live: named and answered, muted, unmuted, and the next table line inside the old
+    window was answered uninvited."""
+    client, _fake, _tmp, _app = env
+    assert "response.output_text.delta" in _types(_turn(client, [_msg("user", "Understudy, roll me a d20")]))
+    client.post(route)
+    assert "response.output_text.delta" not in _types(_turn(client, [_msg("user", "Understudy, hello?")]))
+    client.post("/api/unmute")
+    # The classifier answers IGNORE (the fake's default) once the window is closed.
+    assert "response.output_text.delta" not in _types(_turn(client, [_msg("user", "moving on then")]))
+
+
+def test_a_mute_disarms_a_pending_speak_now(env):
+    client, _fake, _tmp, _app = env
+    client.post("/api/speak_now")
+    client.post("/api/mute")
+    client.post("/api/unmute")
+    assert "response.output_text.delta" not in _types(_turn(client, [_msg("user", "moving on then")]))

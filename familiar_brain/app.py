@@ -425,7 +425,7 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
 
     @app.post("/api/mute")
     def api_mute():
-        state.muted = True; state.set_cue(ASLEEP); return jsonify(ok=True)
+        state.muted = True; state.end_conversation(); state.set_cue(ASLEEP); return jsonify(ok=True)
 
     @app.post("/api/unmute")
     def api_unmute():
@@ -433,7 +433,8 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
 
     @app.post("/api/mute_and_stop_logging")
     def api_mute_stop():
-        state.muted = True; state.logging_enabled = False; state.set_cue(ASLEEP); return jsonify(ok=True)
+        state.muted = True; state.logging_enabled = False; state.end_conversation(); state.set_cue(ASLEEP)
+        return jsonify(ok=True)
 
     @app.post("/api/mode")
     def api_mode():

@@ -67,6 +67,19 @@ class BrainState:
         self.window_extension_s = None
         self.reset_follow_ups()
 
+    def end_conversation(self) -> None:
+        """A mute ends the conversation: close the follow-up window and disarm Speak Now.
+
+        Left open, the window outlived the mute. Live on 2026-09-16: Rocky was named and
+        answered, muted, unmuted, and the next table line, still inside the window, was
+        answered uninvited. A Speak Now armed before the mute would fire the same way.
+        """
+        with self._lock:
+            self._speak_now_armed = False
+        self.last_named_at = None
+        self.window_extension_s = None
+        self.reset_follow_ups()
+
     def remember(self, segment: str, keep: int = 4) -> None:
         self.recent_segments = (self.recent_segments + [segment])[-keep:]
 
