@@ -12,7 +12,10 @@ S2S_VENV="${S2S_VENV:-$HOME/.venvs/s2s}"
 export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-$HOME/.venvs/brain}"
 export PATH="$HOME/.local/bin:$PATH"
 
-MODEL="${MODEL:-ggml-org/gemma-4-E4B-it-GGUF}"
+# The :Q4_0 tag must stay. Without a tag llama-server picks Q8_0, an 8 GB download that
+# held 7678 MiB of VRAM on its own on 2026-09-16 and cannot fit beside Parakeet and
+# Qwen3-TTS. Q4_0 plus the mmproj measured 5740 MiB.
+MODEL="${MODEL:-ggml-org/gemma-4-E4B-it-GGUF:Q4_0}"
 LAN_IP=$(ip -4 addr show 2>/dev/null | awk '/inet /{print $2}' | grep -vE '^127\.|^10\.255\.' | cut -d/ -f1 | head -1)
 mkdir -p data
 
