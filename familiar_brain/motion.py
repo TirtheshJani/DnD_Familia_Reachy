@@ -37,10 +37,10 @@ MIN_REACTION_WORDS = 5
 # Design section 5: a non-addressed line may emit one gesture chosen by a small keyword
 # rule set. These run before the reaction call and cost nothing.
 TABLE_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b(nat(ural)? ?(one|1)|crit(ical)? ?fail(ure|ed|s)?|fumbl(e|ed|es|ing))\b", re.I), "alarmed"),
     (re.compile(r"\b(nat(ural)? ?(twenty|20)|crit(ical)?( hit)?)\b", re.I), "amused"),
-    (re.compile(r"\b(nat(ural)? ?(one|1)|fumble)\b", re.I), "alarmed"),
-    (re.compile(r"\b(went down|(he|she|they)('s| is| are) (down|dead|dying)|get (him|her|them) up|unconscious)\b", re.I), "scared"),
-    (re.compile(r"\b(ha ?ha|hahaha|hilarious)\b", re.I), "amused"),
+    (re.compile(r"\b(went down|(he|she|they)('s|'re| is| are) (down|dead|dying)|get (him|her|them) up|unconscious)\b", re.I), "scared"),
+    (re.compile(r"\b(a?(ha ?){2,}|hilarious)\b", re.I), "amused"),
     (re.compile(r"\b(funeral|farewell|grief|mourn(s|ing)?|weep(s|ing)?|in tears|passed away)\b", re.I), "sad"),
 )
 
@@ -127,6 +127,8 @@ class Choreographer:
                 log.warning("mood classifier failed (%s); using rules", type(e).__name__)
         if mood not in self.persona.gestures:
             mood = addressed_mood(text)
+            if mood not in self.persona.gestures:
+                mood = DEFAULT_ADDRESSED_MOOD
         return self._gated(mood, now)
 
     def for_table(self, text: str, now: float) -> list[dict]:

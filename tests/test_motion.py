@@ -35,6 +35,11 @@ def test_table_mood_rules():
     assert table_mood("hahaha that is hilarious") == "amused"
     assert table_mood("They hold a small funeral at dawn.") == "sad"
     assert table_mood("the door creaks") is None
+    assert table_mood("critical fail") == "alarmed" and table_mood("crit fail") == "alarmed"
+    assert table_mood("not a crit, a nat 1") == "alarmed" and table_mood("Critical hit!") == "amused"
+    assert table_mood("I fumbled") == "alarmed"
+    assert table_mood("hahahaha") == "amused" and table_mood("ahaha") == "amused" and table_mood("Aha! The key!") is None
+    assert table_mood("they're down") == "scared" and table_mood("the drawbridge is down") is None
 
 
 def test_reaction_moods_are_the_four_narration_reactions():
@@ -67,6 +72,7 @@ def test_choreographer_uses_classifier_then_rules_and_rate_limits(tmp_path: Path
     assert calls == ["Rocky, roll a d20"]
     now["t"] += 2
     assert c.for_addressed("Rocky, again", now["t"]) == []          # inside the gap
+    assert calls == ["Rocky, roll a d20"]                            # no mood call inside the gap
     now["t"] += 5
     assert len(c.for_addressed("Rocky, again", now["t"])) == 1       # gap elapsed
 
@@ -78,6 +84,12 @@ def test_choreographer_falls_back_when_classifier_fails_or_answers_nonsense(tmp_
     c2 = Choreographer(persona(tmp_path), min_gap_s=0.0, reaction_gap_s=0.0, clock=lambda: 0.0,
                        mood_classifier=lambda t: "banana")
     assert json.loads(c2.for_addressed("Rocky, hello", 0.0)[0]["arguments"]) == {"emotion": "attentive"}
+
+
+def test_addressed_turn_is_never_silent_when_the_rule_mood_has_no_gesture(tmp_path: Path):
+    c = Choreographer(persona(tmp_path), min_gap_s=0.0, reaction_gap_s=0.0, clock=lambda: 0.0)
+    items = c.for_addressed("good boy Rocky", 0.0)   # rules say proud; this persona has no proud gesture
+    assert [json.loads(i["arguments"]) for i in items] == [{"emotion": "attentive"}]
 
 
 def test_table_reaction_uses_rules_first_and_cues_ignore_the_gap(tmp_path: Path):
@@ -100,6 +112,23 @@ def test_table_reaction_asks_the_classifier_for_narration_of_five_words_or_more(
     assert c.for_table("A shape moves behind the altar and laughs.", 5.0) == []   # inside reaction gap, no call
     assert asked == [line]
     assert c.for_table("short line here", 20.0) == [] and asked == [line]        # under five words, no call
+
+
+def test_table_reaction_rule_hit_skips_the_reaction_call(tmp_path: Path):
+    asked = []
+    def react(text):
+        asked.append(text); return "sad"
+    c = Choreographer(persona(tmp_path), min_gap_s=0.0, reaction_gap_s=15.0, clock=lambda: 0.0,
+                      reaction_classifier=react)
+    assert json.loads(c.for_table("A natural twenty on the goblin chief!", 0.0)[0]["arguments"]) == {"emotion": "happy"}
+    assert asked == []
+
+
+def test_table_reaction_answered_none_moves_no_stamp(tmp_path: Path):
+    c = Choreographer(persona(tmp_path), min_gap_s=0.0, reaction_gap_s=15.0, clock=lambda: 0.0,
+                      reaction_classifier=lambda t: "none")
+    assert c.for_table("You walk for an hour along the road.", 0.0) == []
+    assert c.last_at == c.last_reaction_at == float("-inf")
 
 
 def test_table_reaction_treats_none_nonsense_and_errors_as_no_gesture(tmp_path: Path):
