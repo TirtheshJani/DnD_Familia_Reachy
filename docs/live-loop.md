@@ -15,13 +15,13 @@ Purpose: measure the gate and latency against real audio, alone, before anyone e
 | 1 | The cistern is dark. Water drips somewhere ahead. | IGNORE |
 | 2 | I will check for traps. Rolling perception. | IGNORE |
 | 3 | Natural twenty! | AMBIENT or IGNORE |
-| 4 | Understudy, what do you make of the smell down here? | ADDRESSED |
+| 4 | Rocky, what do you make of the smell down here? | ADDRESSED |
 | 5 | Anything else? | ADDRESSED |
 | 6 | Right, Gustave, you are up. | IGNORE |
 | 7 | Does anyone remember how grapple works? | IGNORE |
-| 8 | Little one, roll me a d20 with advantage. | ADDRESSED |
+| 8 | Rocky, roll me a d20 with advantage. | ADDRESSED |
 | 9 | Nice. | IGNORE |
-| 10 | Understudy, add Gustave to initiative at fourteen. | ADDRESSED |
+| 10 | Rocky, add Gustave to initiative at fourteen. | ADDRESSED |
 | 11 | And Maelle at nine. | ADDRESSED |
 | 12 | Who is up first? | ADDRESSED |
 | 13 | Okay, the door opens. | IGNORE |

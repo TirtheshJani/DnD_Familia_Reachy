@@ -42,3 +42,9 @@ def test_missing_file_is_an_empty_lexicon(tmp_path):
 def test_canonical_spelling_is_left_alone(tmp_path):
     lx = make(tmp_path)
     assert lx.correct("Nephria and Thraka and Styx") == "Nephria and Thraka and Styx"
+
+
+def test_shipped_lexicon_corrects_heard_forms_of_rocky():
+    lex = Lexicon.load(Path(__file__).parent.parent / "config" / "lexicon.tsv")
+    assert lex.correct("Rockie, roll a d20") == "Rocky, roll a d20"
+    assert lex.correct("hey Rockey") == "hey Rocky"
