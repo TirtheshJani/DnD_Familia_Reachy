@@ -44,12 +44,14 @@ class Gate:
         # The window is anchored to naming, not to speech. Anchoring it to speech meant
         # every reply re-armed it, so the familiar answered the whole table forever.
         if self.state.last_named_at is not None and self.state.follow_ups < self.max_follow_ups:
-            deadline = self.state.last_named_at + self.window
+            named = self.state.last_named_at
             spoke = self.state.last_spoke_at
-            if (not self.state.window_extended and spoke is not None
-                    and self.state.last_named_at <= spoke <= deadline):
-                deadline = spoke + self.window   # single extension, from the first reply
-                self.state.window_extended = True
+            if (self.state.window_extension_s is None and spoke is not None
+                    and named <= spoke <= named + self.window):
+                # Single extension, from the first reply. It is stored so that it holds
+                # on every later turn until the familiar is named again.
+                self.state.window_extension_s = spoke - named
+            deadline = named + self.window + (self.state.window_extension_s or 0.0)
             if now < deadline:
                 self.state.count_follow_up()
                 return Decision.ADDRESSED

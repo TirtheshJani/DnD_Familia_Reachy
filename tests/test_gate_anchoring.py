@@ -35,6 +35,46 @@ def test_reply_to_reply_does_not_re_arm_window():
     assert g.decide(["more table talk"]) == Decision.IGNORE
 
 
+def test_one_off_extension_holds_until_named_again():
+    """The first reply pushes the deadline from 0 + 8 to 3 + 8 = 11. That has to hold on
+    every later turn, not only the one that took the extension: at t=10 the unextended
+    deadline of 8 has passed but the extended one has not."""
+    now = {"t": 0.0}
+    seen = []
+
+    def clf(segs):
+        seen.append(segs[-1])
+        return Decision.IGNORE
+
+    st = BrainState()
+    g = Gate(state=st, name="Understudy", aliases=(), follow_up_window_s=8.0,
+             classifier=clf, clock=lambda: now["t"], max_follow_ups=3)
+    assert g.decide(["Understudy, which way?"]) == Decision.ADDRESSED
+    st.mark_spoke(at=3.0)
+    now["t"] = 6.0
+    assert g.decide(["and after that?"]) == Decision.ADDRESSED
+    now["t"] = 10.0
+    assert g.decide(["are you sure?"]) == Decision.ADDRESSED
+    now["t"] = 11.5
+    assert g.decide(["right, Gustave, your turn"]) == Decision.IGNORE
+    assert seen == ["right, Gustave, your turn"], "past the extended deadline the classifier decides"
+
+
+def test_naming_again_resets_the_extension():
+    now = {"t": 0.0}
+    st, g = make(lambda: now["t"])
+    g.decide(["Understudy?"])
+    st.mark_spoke(at=3.0)
+    now["t"] = 6.0
+    assert g.decide(["go on"]) == Decision.ADDRESSED    # extended to 11
+    now["t"] = 50.0
+    assert g.decide(["Understudy, again"]) == Decision.ADDRESSED
+    now["t"] = 57.0
+    assert g.decide(["and?"]) == Decision.ADDRESSED     # fresh window, 50 + 8
+    now["t"] = 58.5
+    assert g.decide(["table talk"]) == Decision.IGNORE, "the old extension must not carry over"
+
+
 def test_naming_again_reopens_window():
     now = {"t": 0.0}
     st, g = make(lambda: now["t"])

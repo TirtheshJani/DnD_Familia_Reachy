@@ -19,8 +19,12 @@ class BrainState:
         # anchoring it to speech let every reply re-arm it. See docs/deviations.md E6.
         self.last_named_at: float | None = None
         # The first reply after being named may push the window out once. After that
-        # the deadline is fixed until somebody names the familiar again.
-        self.window_extended = False
+        # the deadline is fixed until somebody names the familiar again. None until the
+        # extension is taken, then how far past last_named_at + window it moved the
+        # deadline. Kept on state, not recomputed per turn, or the extension lasts one
+        # turn. An offset rather than a clock time, so the deadline is always measured
+        # from last_named_at and backdating that stamp still closes the window.
+        self.window_extension_s: float | None = None
         # How many turns in a row the follow-up window has granted since the familiar
         # was last addressed outright. A cap on top of the fixed deadline, so a rapid
         # exchange inside one window still hands back to the classifier.
@@ -60,7 +64,7 @@ class BrainState:
     def mark_named(self, at: float) -> None:
         """A fresh conversation: reopen the window, allow one extension, reset the cap."""
         self.last_named_at = at
-        self.window_extended = False
+        self.window_extension_s = None
         self.reset_follow_ups()
 
     def remember(self, segment: str, keep: int = 4) -> None:
