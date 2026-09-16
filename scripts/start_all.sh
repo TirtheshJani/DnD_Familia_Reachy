@@ -31,7 +31,10 @@ trap cleanup EXIT INT TERM
 # --jinja is load-bearing: without it llama-server ignores the tools array entirely and
 # returns tool_calls: null, so roll, initiative and note can never fire. The :Q4_0
 # suffix is equally deliberate, see docs/versions.md.
-"$LLAMA_BIN" -hf "$MODEL" -np 2 -c 32768 -fa on --swa-full --jinja --port 8080 --host 127.0.0.1 \
+# Gemma 4 E4B ships mmproj-gemma-4-E4B-it-{BF16,Q8_0}.gguf in the same repo. The
+# projector is what lets the camera tool's frame reach the model (Plan 3, sight).
+# Set MMPROJ_ARGS=--no-mmproj to measure VRAM without it.
+"$LLAMA_BIN" -hf "$MODEL" ${MMPROJ_ARGS:---mmproj-auto} -np 2 -c 32768 -fa on --swa-full --jinja --port 8080 --host 127.0.0.1 \
   > data/llama.log 2>&1 &
 # First run downloads several GB, so allow a long wait here.
 wait_for http://127.0.0.1:8080/health llama-server
