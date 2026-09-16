@@ -2,6 +2,7 @@ import json
 from familiar_brain.responses_api import (
     latest_user_text, function_call_outputs, sse, idle_response_events, with_instructions_and_tools,
     idle_response_json, wants_stream,
+    call_item, item_events, tool_call_events, empty_response_events, idle_items,
 )
 
 REQ = {
@@ -80,3 +81,40 @@ def test_idle_response_json_is_a_complete_response_object():
     item = r["output"][0]
     assert item["type"] == "function_call" and item["name"] == "idle_do_nothing"
     assert item["call_id"].startswith("call_") and item["arguments"] == "{}"
+
+
+def test_call_item_is_a_completed_function_call_with_json_arguments():
+    item = call_item("play_emotion", {"emotion": "happy"})
+    assert item["type"] == "function_call" and item["status"] == "completed"
+    assert item["name"] == "play_emotion" and json.loads(item["arguments"]) == {"emotion": "happy"}
+    assert item["call_id"].startswith("call_") and item["id"].startswith("fc_")
+    assert call_item("idle_do_nothing")["arguments"] == "{}"
+
+
+def test_idle_items_is_one_idle_call():
+    (item,) = idle_items()
+    assert item["name"] == "idle_do_nothing" and item["arguments"] == "{}"
+
+
+def test_item_events_number_items_from_the_start_index():
+    a, b = call_item("head_tracking", {"enabled": True}), call_item("play_emotion", {"emotion": "attentive"})
+    evs = item_events([a, b], start_index=3)
+    assert [e["type"] for e in evs] == [
+        "response.output_item.added", "response.function_call_arguments.delta",
+        "response.function_call_arguments.done", "response.output_item.done"] * 2
+    assert [e["output_index"] for e in evs] == [3, 3, 3, 3, 4, 4, 4, 4]
+    assert evs[0]["item"]["arguments"] == "" and evs[3]["item"] is a
+    assert evs[1]["item_id"] == a["id"] and evs[1]["delta"] == a["arguments"]
+
+
+def test_tool_call_events_wrap_items_in_a_response_envelope():
+    items = [call_item("play_emotion", {"emotion": "happy"})]
+    evs = tool_call_events(items, response_id="r9")
+    assert evs[0]["type"] == "response.created" and evs[0]["response"]["id"] == "r9"
+    assert evs[-1]["type"] == "response.completed" and evs[-1]["response"]["output"] == items
+
+
+def test_empty_response_events_carry_no_items():
+    evs = empty_response_events(response_id="r0")
+    assert [e["type"] for e in evs] == ["response.created", "response.completed"]
+    assert evs[-1]["response"]["output"] == []

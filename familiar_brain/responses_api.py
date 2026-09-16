@@ -42,24 +42,64 @@ def sse(event: dict) -> str:
     return f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
 
 
-def _idle_item() -> dict:
-    # call_id must be client-supplied and prefixed 'call_': speech_to_speech's
-    # Chat.add_item rejects a function_call without one.
+def call_item(name: str, args: dict | None = None) -> dict:
+    """A completed function_call item for a tool the robot owns.
+
+    call_id must be client-supplied and prefixed 'call_': speech_to_speech's
+    Chat.add_item rejects a function_call without one (docs/protocol-notes.md 3).
+    """
     return {"id": f"fc_{uuid.uuid4().hex[:8]}", "type": "function_call", "status": "completed",
-            "call_id": f"call_{uuid.uuid4().hex[:12]}", "name": IDLE_TOOL, "arguments": "{}"}
+            "call_id": f"call_{uuid.uuid4().hex[:12]}", "name": name,
+            "arguments": json.dumps(args or {}, separators=(",", ":"))}
+
+
+def _idle_item() -> dict:
+    return call_item(IDLE_TOOL)
+
+
+def idle_items() -> list[dict]:
+    """The one-item preface for a turn that has nothing else to send."""
+    return [_idle_item()]
+
+
+def item_events(items: list[dict], *, start_index: int = 0) -> list[dict]:
+    """The added, delta, done, done quartet for each item, without the envelope.
+
+    Used on its own to preface an upstream text stream with gestures: speech-to-speech
+    consumes only output_item.done, output_text.delta and completed, so the preface can
+    precede the upstream response.created without confusing it.
+    """
+    out: list[dict] = []
+    for i, item in enumerate(items, start=start_index):
+        out += [
+            {"type": "response.output_item.added", "output_index": i,
+             "item": {**item, "status": "in_progress", "arguments": ""}},
+            {"type": "response.function_call_arguments.delta", "output_index": i,
+             "item_id": item["id"], "delta": item["arguments"]},
+            {"type": "response.function_call_arguments.done", "output_index": i,
+             "item_id": item["id"], "arguments": item["arguments"]},
+            {"type": "response.output_item.done", "output_index": i, "item": item},
+        ]
+    return out
+
+
+def tool_call_events(items: list[dict], *, response_id: str | None = None) -> list[dict]:
+    """A complete streamed response whose only output is the given tool calls."""
+    rid = response_id or f"resp_{uuid.uuid4().hex[:12]}"
+    return ([{"type": "response.created", "response": {"id": rid, "status": "in_progress", "output": []}}]
+            + item_events(items)
+            + [{"type": "response.completed", "response": {"id": rid, "status": "completed", "output": list(items)}}])
 
 
 def idle_response_events(*, response_id: str | None = None) -> list[dict]:
-    rid = response_id or f"resp_{uuid.uuid4().hex[:12]}"
-    item = _idle_item()
-    return [
-        {"type": "response.created", "response": {"id": rid, "status": "in_progress", "output": []}},
-        {"type": "response.output_item.added", "output_index": 0, "item": {**item, "status": "in_progress", "arguments": ""}},
-        {"type": "response.function_call_arguments.delta", "output_index": 0, "item_id": item["id"], "delta": "{}"},
-        {"type": "response.function_call_arguments.done", "output_index": 0, "item_id": item["id"], "arguments": "{}"},
-        {"type": "response.output_item.done", "output_index": 0, "item": item},
-        {"type": "response.completed", "response": {"id": rid, "status": "completed", "output": [item]}},
-    ]
+    return tool_call_events(idle_items(), response_id=response_id)
+
+
+def empty_response_events(*, response_id: str | None = None) -> list[dict]:
+    """A completed response with nothing in it. The answer to a tool-result echo the
+    client sends after a robot-side tool that needed no reply; it cannot start a loop
+    because it carries no tool call for the client to execute."""
+    return tool_call_events([], response_id=response_id)
 
 
 def response_json(output: list[dict], *, response_id: str | None = None, model: str = "familiar") -> dict:
