@@ -9,7 +9,7 @@ from typing import Iterator
 import requests
 
 from familiar_brain import tools
-from familiar_brain.responses_api import sse
+from familiar_brain.responses_api import CAMERA_TOOL, sse
 
 MAX_TOOL_ROUNDS = 3
 
@@ -68,12 +68,25 @@ class Upstream:
             else:
                 buf += line + "\n"
 
-    def stream(self, req: dict) -> Iterator[str]:
-        """Yield SSE frames for the client. Brain tools are executed here and hidden from the client."""
+    def stream(self, req: dict, *, must_speak: bool = False) -> Iterator[str]:
+        """Yield SSE frames for the client. Brain tools are executed here and hidden from the client.
+
+        must_speak: the turn was addressed to the familiar, so it must not end without
+        words. When the model's turn completes with no text and no camera call (whose
+        words come on the sight continuation), its response.completed is held back and
+        the model is asked once more with no tools offered, keeping any brain tool
+        results already in the body. Measured on the live model on 2026-09-16: with no
+        tools, 8 of 8 addressed lines got words, and 3 of 3 reported a roll result that
+        was already in the history. Asking again with tool_choice "none" instead made
+        Gemma speak call syntax aloud ("<|tool_call>call:move_head...").
+        """
         body = copy.deepcopy(req)
         last_response_id: str | None = None
-        for _round in range(MAX_TOOL_ROUNDS + 1):
+        answered = asked_again = False
+        rounds = 0
+        while rounds <= MAX_TOOL_ROUNDS:
             pending: list[dict] = []
+            ask_again = False
             # Argument frames for a brain tool reference their item by item_id and carry
             # no nested item, so the item-shaped check below cannot see them. Collect the
             # ids as the items are announced and suppress anything pointing at them.
@@ -95,11 +108,25 @@ class Upstream:
                 if etype == "response.completed":
                     if pending:
                         break  # do not forward completion yet; we have a round trip to do
+                    if must_speak and not answered and not asked_again:
+                        ask_again = True
+                        break  # hold the completion back; the client ends the turn on it
                     yield sse(ev)
                     return
+                if etype == "response.output_text.delta" and str(ev.get("delta") or "").strip():
+                    answered = True
+                elif (etype == "response.output_item.done" and item.get("type") == "function_call"
+                      and item.get("name") == CAMERA_TOOL):
+                    answered = True
                 yield sse(ev)
+            if ask_again:
+                log.warning("addressed turn came back without words; asking again with no tools")
+                asked_again = True
+                body = {k: v for k, v in body.items() if k not in ("tools", "tool_choice")}
+                continue
             if not pending:
                 return
+            rounds += 1
             for item in pending:
                 try:
                     args = json.loads(item.get("arguments") or "{}")

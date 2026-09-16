@@ -316,3 +316,35 @@ def test_the_same_history_long_after_is_not_a_revision(env, monkeypatch):
     client, _fake, _tmp, _app = env
     assert _calls(_turn(client, [SYSTEM, _msg("user", "Understudy, what's the DC?")]))
     assert _calls(_turn(client, [SYSTEM, _msg("user", "Understudy, what's the DC? For the lock.")])) == []
+
+
+ROBOT_TOOLS = [{"type": "function", "name": n, "parameters": {"type": "object", "properties": {}}}
+               for n in ("move_head", "play_emotion", "stop_emotion", "idle_do_nothing", "head_tracking", "camera")]
+
+
+@pytest.mark.parametrize("stream", [True, False])
+def test_gesture_tools_are_never_offered_to_the_model(env, stream):
+    """Offered them, Gemma answered an addressed line with a bare move_head, or spoke the
+    call aloud as text. The brain gestures on its own, so the model only needs the camera."""
+    client, fake, _tmp, _app = env
+    client.post("/v1/responses", json={"model": "familiar", "stream": stream, "tools": ROBOT_TOOLS,
+                                       "input": [SYSTEM, _msg("user", "Understudy, look at me")]}).get_data()
+    offered = {t["name"] for t in [r for r in fake.requests if r["path"].endswith("/responses")][-1]["body"]["tools"]}
+    assert "camera" in offered and {"roll", "note"} <= offered
+    assert not offered & {"move_head", "play_emotion", "stop_emotion", "idle_do_nothing", "head_tracking"}
+
+
+def test_an_addressed_turn_that_came_back_without_words_is_asked_again(env):
+    client, fake, _tmp, app = env
+    bare = {"id": "fc_x", "type": "function_call", "call_id": "call_x", "name": "move_head",
+            "arguments": '{"direction":"front"}', "status": "completed"}
+    fake.responses_events.extend([
+        [{"type": "response.output_item.done", "output_index": 0, "item": bare},
+         {"type": "response.completed", "response": {"id": "r1", "output": [bare]}}],
+        [{"type": "response.output_text.delta", "delta": "I am looking."},
+         {"type": "response.completed", "response": {"id": "r2", "output": []}}],
+    ])
+    resp = _turn(client, [SYSTEM, _msg("user", "Understudy, look at me")])
+    assert "response.output_text.delta" in _types(resp)
+    assert len([r for r in fake.requests if r["path"].endswith("/responses")]) == 2
+    assert app.extensions["brain_state"].last_spoke_at is not None

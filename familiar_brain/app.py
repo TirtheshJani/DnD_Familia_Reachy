@@ -78,8 +78,9 @@ class _PrefaceStart:
     cue: str | None
 
 
-def _without_gesture_calls(req: dict) -> dict:
-    """The request with every gesture and idle call, and its result, out of the history.
+def _without_gestures(req: dict) -> dict:
+    """The request with every gesture and idle call, and its result, out of the history,
+    and the gesture tools out of the tools it offers.
 
     speech-to-speech records each call the brain sends ahead of the reply text, so from the
     second turn on the history shows a model that answers with play_emotion before it
@@ -90,7 +91,18 @@ def _without_gesture_calls(req: dict) -> dict:
     goes too: it is the same brain-made call with no speech after it. Camera calls, their
     results and the frame stay, or sight loses its image. Only the copy sent upstream
     changes: continuation_kind reads the request as it came, so an echo is still an echo.
+
+    The tools go for the same reason. With the history already clean, 16 addressed lines
+    on 2026-09-16 with the robot's tools offered got 2 bare move_head calls and 4 replies
+    that spoke the call as text ("play_emotion(thinking)", "I_head(left)"). Hidden, none
+    of either: 12 spoke and 4 called the camera for "look at me". The brain sends every
+    gesture itself (motion.py, attention.py). Only this copy changes, so speech-to-speech
+    and the app still hold the full tool list the brain's own gesture calls rely on.
     """
+    offered = req.get("tools")
+    if isinstance(offered, list):
+        req = {**req, "tools": [t for t in offered
+                                if not (isinstance(t, dict) and t.get("name") in GESTURE_TOOLS)]}
     items = req.get("input")
     if not isinstance(items, list):
         return req
@@ -297,7 +309,7 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
                 _log(text, decision, spoke=False)
             timer.finish(decision=label, spoke=False)
             return jsonify(idle_response_json(model=model))
-        outgoing = with_instructions_and_tools(_without_gesture_calls(req),
+        outgoing = with_instructions_and_tools(_without_gestures(req),
                                               instructions=_instructions(text, timer),
                                               extra_tools=tools.specs())
         try:
@@ -370,7 +382,7 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
             timer.finish(decision=label, spoke=False)
             body = "".join(sse(e) for e in tool_call_events(preface or idle_items()))
             return Response(body, content_type="text/event-stream")
-        outgoing = with_instructions_and_tools(_without_gesture_calls(req),
+        outgoing = with_instructions_and_tools(_without_gestures(req),
                                               instructions=_instructions(text, timer),
                                               extra_tools=tools.specs())
 
@@ -383,7 +395,7 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
                 # (docs/protocol-notes.md 2).
                 for ev in item_events(preface):
                     yield sse(ev)
-                for frame in upstream.stream(outgoing):
+                for frame in upstream.stream(outgoing, must_speak=True):
                     if "response.output_text.delta" in frame:
                         spoke = True
                     yield frame

@@ -115,3 +115,86 @@ def test_stream_always_terminates_with_completed(fake):
     evs = _events(list(up.stream({"input": [{"role": "user", "content": "roll"}], "stream": True})))
     assert evs, "stream produced no events at all"
     assert evs[-1]["type"] == "response.completed", f"stream ended on {evs[-1]['type']}"
+
+
+# --- an addressed turn always gets words, see familiar_brain/app.py responses() ---
+
+def _silent(name: str = "play_emotion", call_id: str = "call_g") -> list[dict]:
+    call = {"id": f"fc_{call_id}", "type": "function_call", "call_id": call_id, "name": name,
+            "arguments": "{}", "status": "completed"}
+    return [{"type": "response.created", "response": {"id": "r1", "output": []}},
+            {"type": "response.output_item.done", "output_index": 0, "item": call},
+            {"type": "response.completed", "response": {"id": "r1", "output": [call]}}]
+
+
+def _spoken(text: str = "Seventeen.") -> list[dict]:
+    return [{"type": "response.output_text.delta", "delta": text},
+            {"type": "response.completed", "response": {"id": "r2", "output": []}}]
+
+
+def _responses_bodies(fake) -> list[dict]:
+    return [r["body"] for r in fake.requests if r["path"].endswith("/responses")]
+
+
+APP_TOOLS = [{"type": "function", "name": "camera"}, {"type": "function", "name": "roll"}]
+
+
+def test_a_turn_that_must_speak_and_came_back_silent_is_asked_again_without_tools(fake):
+    fake.responses_events.extend([_silent(), _spoken("Content enough.")])
+    up = Upstream(base_url=fake.base_url, generate_slot=0, brain_tool_names=set())
+    evs = _events(list(up.stream({"input": [{"role": "user", "content": "Rocky, how are you?"}],
+                                  "tools": APP_TOOLS, "tool_choice": "auto", "stream": True},
+                                 must_speak=True)))
+    bodies = _responses_bodies(fake)
+    assert len(bodies) == 2
+    assert "tools" in bodies[0] and "tools" not in bodies[1] and "tool_choice" not in bodies[1]
+    assert bodies[1]["input"] == bodies[0]["input"]
+    assert any(e.get("delta") == "Content enough." for e in evs)
+    # One completed, at the end: speech-to-speech ends the turn on the first it sees.
+    assert [e["type"] for e in evs].count("response.completed") == 1 and evs[-1]["type"] == "response.completed"
+
+
+def test_a_silent_turn_is_asked_again_only_once(fake):
+    fake.responses_events.extend([_silent(), _silent(call_id="call_h")])
+    up = Upstream(base_url=fake.base_url, generate_slot=0, brain_tool_names=set())
+    evs = _events(list(up.stream({"input": [{"role": "user", "content": "Rocky?"}], "stream": True},
+                                 must_speak=True)))
+    assert len(_responses_bodies(fake)) == 2
+    assert evs[-1]["type"] == "response.completed"
+
+
+def test_a_camera_call_is_an_answer_and_needs_no_second_ask(fake):
+    """The words come on the sight continuation, after the robot has taken the picture."""
+    fake.responses_events.append(_silent("camera", "call_cam"))
+    up = Upstream(base_url=fake.base_url, generate_slot=0, brain_tool_names=set())
+    list(up.stream({"input": [{"role": "user", "content": "Rocky, what do you see?"}], "stream": True},
+                   must_speak=True))
+    assert len(_responses_bodies(fake)) == 1
+
+
+def test_without_must_speak_a_silent_turn_goes_out_as_it_came(fake):
+    fake.responses_events.append(_silent())
+    up = Upstream(base_url=fake.base_url, generate_slot=0, brain_tool_names=set())
+    evs = _events(list(up.stream({"input": [{"role": "user", "content": "hi"}], "stream": True})))
+    assert len(_responses_bodies(fake)) == 1 and evs[-1]["type"] == "response.completed"
+
+
+def test_the_second_ask_keeps_the_brain_tool_results(fake):
+    """Asked again from the original request, the model would have lost the roll and be
+    left to invent a number, which the persona forbids."""
+    tools.register(roll_tool)
+    call = {"id": "fc1", "type": "function_call", "call_id": "c1", "name": "roll",
+            "arguments": ROLL_ARGS, "status": "completed"}
+    fake.responses_events.extend([
+        [{"type": "response.output_item.done", "output_index": 0, "item": call},
+         {"type": "response.completed", "response": {"id": "r1", "output": [call]}}],
+        [{"type": "response.completed", "response": {"id": "r2", "output": []}}],
+        _spoken(),
+    ])
+    up = Upstream(base_url=fake.base_url, generate_slot=0, brain_tool_names={"roll"})
+    evs = _events(list(up.stream({"input": [{"role": "user", "content": "Rocky, roll a d20"}],
+                                  "tools": APP_TOOLS, "stream": True}, must_speak=True)))
+    bodies = _responses_bodies(fake)
+    assert len(bodies) == 3 and "tools" in bodies[1] and "tools" not in bodies[2]
+    assert bodies[2]["input"][-1]["type"] == "function_call_output" and bodies[2]["input"][-1]["call_id"] == "c1"
+    assert any(e.get("delta") == "Seventeen." for e in evs)
