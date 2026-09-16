@@ -6,6 +6,10 @@ import time
 import uuid
 
 IDLE_TOOL = "idle_do_nothing"
+CAMERA_TOOL = "camera"
+# The conversation app opens a session by asking the model for a greeting with this
+# exact prompt (prompts.py DEFAULT_GREETING_PROMPT). It is not a table utterance.
+GREETING_MARKER = "Start the conversation now"
 
 
 def _text_of(content) -> str:
@@ -26,6 +30,43 @@ def latest_user_text(req: dict) -> str:
 def function_call_outputs(req: dict) -> list[tuple[str, str]]:
     return [(i["call_id"], str(i.get("output", ""))) for i in (req.get("input") or [])
             if isinstance(i, dict) and i.get("type") == "function_call_output"]
+
+
+def continuation_kind(req: dict) -> str | None:
+    """Classify a request that is not a fresh utterance from the table.
+
+    None:       an ordinary utterance; run the gate. A user message that carries text
+                alongside an image is still an utterance.
+    "sight":    the client just attached a camera frame, or returned the camera tool's
+                result; the next generation must see it, so the gate is bypassed.
+    "echo":     the client returned the output of another robot-side tool (the app
+                requests a response after idle_do_nothing and camera, which keep
+                needs_response=True). Answer with nothing; it cannot loop.
+    "greeting": the app's session-open greeting prompt.
+    Shapes from huggingface_realtime.py (app 1.0.1) and docs/protocol-notes.md 4 and 6.
+    """
+    items = req.get("input")
+    # The Responses API also accepts a bare string as the whole input; that is an
+    # utterance, never a continuation.
+    if not isinstance(items, list) or not items:
+        return None
+    last = items[-1]
+    if not isinstance(last, dict):
+        return None
+    if last.get("role") == "user":
+        content = last.get("content")
+        if isinstance(content, list):
+            kinds = {p.get("type") for p in content if isinstance(p, dict)}
+            if "input_image" in kinds and not kinds & {"input_text", "text"}:
+                return "sight"
+        return "greeting" if GREETING_MARKER in _text_of(content) else None
+    if last.get("type") == "function_call_output":
+        # A result whose call is missing (the client may have trimmed history) is an
+        # echo too: a tool result is never something the table said.
+        names = {i.get("call_id"): i.get("name") for i in items
+                 if isinstance(i, dict) and i.get("type") == "function_call"}
+        return "sight" if names.get(last.get("call_id")) == CAMERA_TOOL else "echo"
+    return None
 
 
 def wants_stream(req: dict) -> bool:

@@ -3,6 +3,7 @@ from familiar_brain.responses_api import (
     latest_user_text, function_call_outputs, sse, idle_response_events, with_instructions_and_tools,
     idle_response_json, wants_stream,
     call_item, item_events, tool_call_events, empty_response_events, idle_items,
+    continuation_kind, GREETING_MARKER,
 )
 
 REQ = {
@@ -118,3 +119,80 @@ def test_empty_response_events_carry_no_items():
     evs = empty_response_events(response_id="r0")
     assert [e["type"] for e in evs] == ["response.created", "response.completed"]
     assert evs[-1]["response"]["output"] == []
+
+
+# --- continuations: requests that are not a fresh utterance from the table ---
+
+IMG = {"type": "input_image", "image_url": "data:image/jpeg;base64,/9j/AAA="}
+
+
+def test_camera_frame_as_last_item_is_a_sight_continuation():
+    req = {"input": [
+        {"role": "user", "content": [{"type": "input_text", "text": "Rocky, what do you see?"}]},
+        {"type": "function_call", "call_id": "call_1", "name": "camera", "arguments": "{\"question\":\"scene\"}"},
+        {"type": "function_call_output", "call_id": "call_1", "output": "{\"image_attached\": true}"},
+        {"type": "message", "role": "user", "content": [IMG]},
+    ]}
+    assert continuation_kind(req) == "sight"
+
+
+def test_camera_result_without_a_frame_is_still_sight_so_the_model_can_say_it_failed():
+    req = {"input": [
+        {"role": "user", "content": "Rocky, look"},
+        {"type": "function_call", "call_id": "call_2", "name": "camera", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call_2", "output": "{\"error\": \"Camera is disabled\"}"},
+    ]}
+    assert continuation_kind(req) == "sight"
+
+
+def test_other_tool_results_are_echoes():
+    req = {"input": [
+        {"role": "user", "content": "the door creaks"},
+        {"type": "function_call", "call_id": "call_3", "name": "idle_do_nothing", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call_3", "output": "{\"status\": \"idle\"}"},
+    ]}
+    assert continuation_kind(req) == "echo"
+
+
+def test_ordinary_utterances_and_the_greeting_prompt():
+    assert continuation_kind({"input": [{"role": "user", "content": "Rocky, hello"}]}) is None
+    assert continuation_kind({"input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}, IMG]}]}) is None
+    assert continuation_kind({"input": []}) is None
+    greeting = {"input": [{"role": "user", "content": [{"type": "input_text", "text": GREETING_MARKER + " with a brief greeting"}]}]}
+    assert continuation_kind(greeting) == "greeting"
+
+
+def test_greeting_marker_in_a_bare_string_content_is_the_greeting():
+    req = {"input": [{"role": "user", "content": GREETING_MARKER + " with a brief greeting"}]}
+    assert continuation_kind(req) == "greeting"
+
+
+def test_tool_result_whose_call_is_not_in_the_input_is_an_echo():
+    """The client may have trimmed the function_call out of history; a tool result is
+    still never an utterance, so it must not reach the gate."""
+    req = {"input": [
+        {"role": "user", "content": "the door creaks"},
+        {"type": "function_call_output", "call_id": "call_gone", "output": "{\"status\": \"idle\"}"},
+    ]}
+    assert continuation_kind(req) == "echo"
+
+
+def test_image_only_message_item_is_sight():
+    req = {"input": [{"type": "message", "role": "user", "content": [IMG, dict(IMG)]}]}
+    assert continuation_kind(req) == "sight"
+
+
+def test_utterance_carrying_an_image_is_still_an_utterance():
+    req = {"input": [{"type": "message", "role": "user",
+                      "content": [IMG, {"type": "input_text", "text": "Rocky, is that a goblin?"}]}]}
+    assert continuation_kind(req) is None
+
+
+def test_malformed_or_missing_input_is_not_a_continuation():
+    assert continuation_kind({}) is None
+    assert continuation_kind({"input": None}) is None
+    assert continuation_kind({"input": []}) is None
+    assert continuation_kind({"input": ["Rocky, hello"]}) is None
+    assert continuation_kind({"input": [{"role": "user", "content": "hi"}, None]}) is None
+    # The Responses API also accepts a bare string as the whole input.
+    assert continuation_kind({"input": "Rocky, hello"}) is None
