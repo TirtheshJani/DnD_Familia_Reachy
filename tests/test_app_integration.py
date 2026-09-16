@@ -20,7 +20,16 @@ def env(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(indexing, "open_store",
                         lambda cfg: Store(tmp_path / "k.db", embedder=FakeEmbedder()))
     persona = tmp_path / "persona.yaml"
-    persona.write_text("name: Understudy\naliases: [understudy, little one]\ntts_speaker: Aiden\nmanner: dry\n")
+    persona.write_text("name: Understudy\naliases: [understudy, little one]\ntts_speaker: Aiden\nmanner: dry\n"
+                       "gestures:\n"
+                       "  attentive: play_emotion:attentive\n"
+                       "  amused: play_emotion:happy\n"
+                       "  alarmed: play_emotion:surprised\n"
+                       "  thoughtful: play_emotion:thinking\n"
+                       "  sad: play_emotion:sad\n"
+                       "  scared: play_emotion:scared\n"
+                       "  asleep: play_emotion:sleepy\n"
+                       "  awake: play_emotion:welcoming\n")
     cfg = tmp_path / "brain.toml"
     # as_posix: a raw Windows path would put \U and \s escapes inside a TOML basic
     # string, which tomllib rejects. Forward slashes parse on both platforms.
@@ -89,7 +98,10 @@ def test_mock_session_speaks_only_when_addressed(env):
         if row["expect"] == "ADDRESSED":
             assert "idle_do_nothing" not in names and "response.output_text.delta" in _types(resp)
         else:
-            assert names == ["idle_do_nothing"]
+            assert "response.output_text.delta" not in _types(resp)
+            expected_motion = {"AMBIENT": {"play_emotion"},
+                               "IGNORE": {"idle_do_nothing", "head_tracking", "move_head", "play_emotion"}}
+            assert set(names) <= expected_motion[row["expect"]] and names
     # every utterance was logged regardless of decision
     sessions = list((tmp / "sessions").glob("*.jsonl"))
     assert len(sessions) == 1
@@ -102,7 +114,7 @@ def test_mute_blocks_and_state_reports(env):
     client.post("/api/session/start")
     client.post("/api/mute")
     resp = client.post("/v1/responses", json={"input": [{"role": "user", "content": "Understudy!"}], "stream": True})
-    assert _names(resp) == ["idle_do_nothing"]
+    assert _names(resp) == ["play_emotion"]
     assert client.get("/api/state").get_json()["muted"] is True
     client.post("/api/unmute")
     assert client.get("/api/state").get_json()["muted"] is False
@@ -111,7 +123,11 @@ def test_mute_blocks_and_state_reports(env):
 def test_persona_instructions_and_tools_reach_upstream(env):
     client, fake, _, _app = env
     client.post("/api/session/start")
-    client.post("/v1/responses", json={"input": [{"role": "user", "content": "Understudy, hello"}], "stream": True, "tools": []})
+    # Read the stream as speech-to-speech does. The test client reads only the first chunk
+    # on its own, and since Plan 3 that chunk is the gesture preface, sent before the
+    # upstream call is made.
+    client.post("/v1/responses", json={"input": [{"role": "user", "content": "Understudy, hello"}],
+                                       "stream": True, "tools": []}).get_data()
     body = fake.requests[-1]["body"]
     assert "Understudy" in body["instructions"] and "Dungeon Master" in body["instructions"]
     assert {"roll", "initiative", "note"} <= {t["name"] for t in body["tools"]}
