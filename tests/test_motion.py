@@ -105,14 +105,22 @@ def test_choreographer_asks_the_classifier_when_no_rule_matches_and_rate_limits(
     assert len(c.for_addressed("Rocky, again", now["t"])) == 1       # gap elapsed
 
 
-def test_choreographer_falls_back_when_classifier_fails_or_answers_nonsense(tmp_path: Path):
+def test_a_plain_reply_plays_no_emotion_when_the_call_fails_or_answers_nonsense(tmp_path: Path):
     c = Choreographer(persona(tmp_path), min_gap_s=0.0, reaction_gap_s=0.0, clock=lambda: 0.0,
                       mood_classifier=lambda t: (_ for _ in ()).throw(RuntimeError("down")))
-    assert json.loads(c.for_addressed("Rocky, hello", 0.0)[0]["arguments"]) == {"emotion": "attentive"}
+    assert c.for_addressed("Rocky, hello", 0.0) == []
     assert json.loads(c.for_addressed("Rocky, what do you think", 0.0)[0]["arguments"]) == {"emotion": "thinking"}
     c2 = Choreographer(persona(tmp_path), min_gap_s=0.0, reaction_gap_s=0.0, clock=lambda: 0.0,
                        mood_classifier=lambda t: "banana")
-    assert json.loads(c2.for_addressed("Rocky, hello", 0.0)[0]["arguments"]) == {"emotion": "attentive"}
+    assert c2.for_addressed("Rocky, hello", 0.0) == []
+
+
+def test_a_plain_reply_plays_no_emotion_over_speech_and_spends_no_gap(tmp_path: Path):
+    """attentive1 ran 4.28 s over the start of every reply; live, TJ asked what the
+    constant emotes were."""
+    c = Choreographer(persona(tmp_path), min_gap_s=6.0, reaction_gap_s=0.0, clock=lambda: 0.0)
+    assert c.for_addressed("Rocky, hello", 0.0) == [] and c.for_addressed("Rocky, roll me a d20", 1.0) == []
+    assert json.loads(c.for_addressed("Rocky, that is hilarious", 2.0)[0]["arguments"]) == {"emotion": "happy"}
 
 
 def test_addressed_rule_hit_wins_and_skips_the_mood_call(tmp_path: Path):
@@ -132,14 +140,13 @@ def test_addressed_rule_hit_wins_and_skips_the_mood_call(tmp_path: Path):
     assert emotion("Rocky, that is hilarious") == ["happy"]
     assert asked == []
     assert emotion("Rocky, poor Tomas is dead") == ["sad"]           # no rule: the call decides
-    assert emotion("Rocky, roll me a d20.") == ["attentive"]         # the roll rule wins too
+    assert emotion("Rocky, roll me a d20.") == []                    # the roll rule wins too: no emotion
     assert asked == ["Rocky, poor Tomas is dead"]
 
 
-def test_addressed_turn_is_never_silent_when_the_rule_mood_has_no_gesture(tmp_path: Path):
+def test_a_rule_mood_with_no_gesture_is_left_to_the_call(tmp_path: Path):
     c = Choreographer(persona(tmp_path), min_gap_s=0.0, reaction_gap_s=0.0, clock=lambda: 0.0)
-    items = c.for_addressed("good boy Rocky", 0.0)   # rules say proud; this persona has no proud gesture
-    assert [json.loads(i["arguments"]) for i in items] == [{"emotion": "attentive"}]
+    assert c.for_addressed("good boy Rocky", 0.0) == []   # rules say proud; this persona has no proud gesture
     c2 = Choreographer(persona(tmp_path), min_gap_s=0.0, reaction_gap_s=0.0, clock=lambda: 0.0,
                        mood_classifier=lambda t: "amused")
     items = c2.for_addressed("good boy Rocky", 0.0)  # a rule mood with no gesture leaves it to the call

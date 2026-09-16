@@ -136,26 +136,28 @@ class Choreographer:
         return [item]
 
     def for_addressed(self, text: str, now: float) -> list[dict]:
-        """The gesture for the mood Rocky answers in, or nothing inside the gap.
+        """The gesture for a reply whose line carries a mood, or nothing.
 
-        Rules first: a hit for a mood with a gesture configured decides and skips the
-        mood call. Otherwise the call decides when it answers a mood this persona has a
-        gesture for, and anything else is the default.
+        A plain reply gets no emotion. Every addressed turn used to queue attentive, and on
+        the robot attentive1 runs 4.28 s from a start 17.8 degrees off neutral, so it played
+        over the first 1.3 to 2.2 s of speech. Live on 2026-09-16 TJ asked Rocky "what's
+        with the weird gestures and emotes that you have that go on constantly?". Rules
+        first: a hit for a mood with a gesture configured decides and skips the mood call.
+        Otherwise the call, if there is one, may name a mood; the default mood, no answer
+        or a mood with no gesture is no gesture, and spends no gap.
         """
         if now - self.last_at < self.min_gap_s:
             return []
         mood = addressed_mood(text)
-        if mood not in self.persona.gestures:  # no rule matched, or no gesture for its mood
-            mood = DEFAULT_ADDRESSED_MOOD
-            if self.mood_classifier is not None:
-                try:
-                    answer = self.mood_classifier(text)
-                except Exception as e:  # a dead classify slot must not cost the gesture
-                    log.warning("mood classifier failed (%s); using %s", type(e).__name__, mood)
-                    answer = None
-                log.info("mood call answered %r", answer)
-                if answer in self.persona.gestures:
-                    mood = answer
+        if mood not in self.persona.gestures and self.mood_classifier is not None:
+            try:
+                mood = self.mood_classifier(text)
+            except Exception as e:  # a dead classify slot must not cost the reply
+                log.warning("mood classifier failed (%s); no gesture", type(e).__name__)
+                mood = None
+            log.info("mood call answered %r", mood)
+        if mood == DEFAULT_ADDRESSED_MOOD or mood not in self.persona.gestures:
+            return []
         return self._gated(mood, now)
 
     def for_table(self, text: str, now: float) -> list[dict]:

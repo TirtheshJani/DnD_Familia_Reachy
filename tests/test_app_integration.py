@@ -273,7 +273,7 @@ def test_a_revised_line_carries_the_preface_its_superseded_version_took(env):
     the live 6 s gesture gap."""
     client, _fake, _tmp, app = env
     first = _calls(_turn(client, [SYSTEM, _msg("user", "Understudy, what's the DC?")]))
-    assert first == [("head_tracking", {"enabled": True}), ("play_emotion", {"emotion": "attentive"})]
+    assert first == [("head_tracking", {"enabled": True})]
     revised = [SYSTEM, _msg("user", "Understudy, what's the DC? For the lock, I mean.")]
     assert _calls(_turn(client, revised)) == first
     assert _calls(_turn(client, revised[:1] + [_msg("user", "Understudy, what's the DC? For the lock, I mean it.")])) == first
@@ -421,9 +421,8 @@ def test_history_compaction_goes_upstream_untouched_and_touches_no_state(env):
     assert next((tmp / "sessions").glob("*.jsonl")).read_text() == ""
 
 
-def test_the_mood_call_before_a_reply_waits_at_most_half_a_second(env, monkeypatch):
-    """It runs before the first word. Under GPU contention it took 600 to 900 ms, and with
-    the gate's 1.5 s budget a reply could wait that long for a facial expression."""
+def test_no_mood_call_runs_before_a_reply_and_the_gate_keeps_its_budget(env, monkeypatch):
+    """The mood call ran before the first word and timed out on 11 of 11 live turns."""
     import requests as rq
     client, _fake, _tmp, app = env
     real, seen = rq.post, []
@@ -439,5 +438,5 @@ def test_the_mood_call_before_a_reply_waits_at_most_half_a_second(env, monkeypat
     _turn(client, [_msg("user", "the innkeeper wipes down the long oak bar")])
     mood = [t for prompt, t in seen if prompt.startswith("You choose the facial expression")]
     gate = [t for prompt, t in seen if prompt.startswith("You are a strict filter")]
-    assert mood and all(t <= 0.5 for t in mood)
+    assert mood == []
     assert gate == [1.0]                        # the gate keeps its configured budget

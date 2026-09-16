@@ -145,7 +145,6 @@ def test_short_ignored_line_makes_no_reaction_call(env):
 
 def test_tracking_is_switched_off_once_the_window_and_linger_have_passed(env):
     client, fake, _, app = env
-    fake.chat_replies.append("attentive")       # the mood call for the named line
     _say(client, "Rocky, hello")
     bs = app.extensions["brain_state"]
     bs.last_named_at -= 60; bs.last_spoke_at = (bs.last_spoke_at or 0) - 60
@@ -178,20 +177,17 @@ def test_mode_api_and_phrase_change_the_length_block_sent_upstream(env):
 
 # --- review notes and gaps found reading the code ---
 
-def test_mood_call_never_offers_the_sleep_and_wake_cues(env):
-    """asleep and awake are the mute and unmute cues, not moods to answer in."""
+def test_a_plain_addressed_reply_makes_no_mood_call_and_plays_no_emotion(env):
+    """Live, the mood call timed out on 11 of 11 addressed turns and fell back to attentive,
+    whose 4.28 s move played over the start of every reply."""
     client, fake, _, _ = env
-    fake.chat_replies.append("attentive")       # the mood call; a named line skips classify
-    _say(client, "Rocky, hello")                # no rule matches, so the mood call is made
-    [mood_call] = _chat_calls(fake)
-    system = mood_call["messages"][0]["content"]
-    assert "thoughtful" in system and "attentive" in system
-    assert "asleep" not in system and "awake" not in system
+    resp = _say(client, "Rocky, hello")
+    assert _calls(resp) == [("head_tracking", {"enabled": True})]
+    assert _chat_calls(fake) == [] and "response.output_text.delta" in _types(resp)
 
 
 def test_tracking_off_goes_out_ahead_of_the_mute_cue(env):
     client, fake, _, _ = env
-    fake.chat_replies.append("attentive")       # the mood call for the named line
     assert ("head_tracking", {"enabled": True}) in _calls(_say(client, "Rocky, hello"))
     assert client.get("/api/state").get_json()["tracking"] is True
     client.post("/api/mute")

@@ -60,12 +60,6 @@ ASLEEP, AWAKE = "asleep", "awake"
 # attention.py), plus stop_emotion, the other gesture tool the app offers the model.
 GESTURE_TOOLS = frozenset({"play_emotion", "head_tracking", "move_head", "stop_emotion", IDLE_TOOL})
 
-# The longest an addressed turn waits for its mood call before speaking. The call runs
-# ahead of the first word; under GPU contention it took 600 to 900 ms, and on the gate's
-# budget (classify_timeout_s, 1.5 s) a reply could wait that long for a facial expression.
-# Past this the turn goes out with the default mood. The gate keeps its own budget.
-MOOD_TIMEOUT_S = 0.5
-
 # How soon after an utterance a request with the same history can still be a revision of
 # it. speech-to-speech reopens a turn after a pause of up to 7 s (unanswered_reopen_ms),
 # and the player may talk on for a while before the revision is sent. Past this, the
@@ -199,16 +193,14 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
     upstream = Upstream(base_url=cfg.upstream.base_url, generate_slot=cfg.upstream.generate_slot,
                         brain_tool_names={s["name"] for s in tools.specs()})
     robot = RobotDaemon(cfg.robot.daemon_url, timeout_s=cfg.robot.doa_timeout_s)
-    # asleep and awake are the mute and unmute cues, played by Choreographer.cue. Offered
-    # to the mood call they would let an ordinary reply go out looking like a mute.
-    reply_moods = tuple(m for m in persona.gestures if m not in (ASLEEP, AWAKE))
-    mood_llm = LLMClient(base_url=cfg.upstream.base_url, classify_slot=cfg.upstream.classify_slot,
-                         classify_timeout_s=min(cfg.upstream.classify_timeout_s, MOOD_TIMEOUT_S),
-                         generate_slot=cfg.upstream.generate_slot)
+    # No mood call on addressed turns: it ran ahead of the first word, and live on
+    # 2026-09-16 it timed out on 11 of 11 addressed turns under GPU contention, always
+    # falling back to attentive, the emotion that played over Rocky's speech. The keyword
+    # rules alone choose a reply's gesture (motion.for_addressed).
     choreo = Choreographer(
         persona, min_gap_s=cfg.motion.min_gesture_gap_s, reaction_gap_s=cfg.motion.reaction_gap_s,
         clock=time.time,
-        mood_classifier=lambda t: mood_llm.mood(t, moods=reply_moods),
+        mood_classifier=None,
         reaction_classifier=lambda t: llm.mood(t, moods=REACTION_MOODS + ("none",), prompt=REACTION_INSTRUCTION),
     )
     attention = Attention(state=state, doa=robot.doa, follow_up_window_s=cfg.gate.follow_up_window_s,
