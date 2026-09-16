@@ -131,7 +131,9 @@ class LLMClient:
         Choreographer's mood classifier for addressed turns and REACTION_INSTRUCTION to its
         reaction classifier for table lines. The first word of the answer must equal a
         listed mood, so mood keys must be single lowercase words. Returns None for anything
-        else, and logs the raw answer, so the caller falls back to its keyword rules.
+        else, and logs the raw answer. The keyword rules have already been tried by then
+        (motion.Choreographer), so None means the default mood on an addressed turn and no
+        reaction on a table line.
         """
         body = {
             "messages": [

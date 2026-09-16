@@ -46,16 +46,19 @@ def test_reaction_moods_are_the_four_narration_reactions():
     assert REACTION_MOODS == ("amused", "alarmed", "sad", "scared")
 
 
-def test_addressed_mood_rules_default_to_attentive():
+def test_addressed_mood_rules_say_none_when_nothing_matches():
+    """Like table_mood: None means no rule matched, so the caller can tell a roll, which
+    the rules answer attentive, from a line the rules know nothing about."""
     assert addressed_mood("Rocky, roll me a d20") == "attentive"
     assert addressed_mood("Rocky, what do you think of him?") == "thoughtful"
     assert addressed_mood("good boy Rocky") == "proud"
-    assert addressed_mood("Rocky, hello") == "attentive"
+    assert addressed_mood("Rocky, hello") is None
 
 
 def test_addressed_rules_catch_a_warning_laughter_and_a_request_to_think():
     assert addressed_mood("Rocky, is that a dragon behind us?") == "alarmed"
     assert addressed_mood("Rocky, look out!") == "alarmed" and addressed_mood("watch out, Rocky") == "alarmed"
+    assert addressed_mood("Rocky, look out") == "alarmed" and addressed_mood("Rocky, look out behind you!") == "alarmed"
     assert addressed_mood("Rocky, are we in danger?") == "alarmed"
     assert addressed_mood("Rocky, that is hilarious") == "amused" and addressed_mood("hahaha Rocky") == "amused"
     assert addressed_mood("Rocky, good joke") == "amused"
@@ -66,11 +69,16 @@ def test_addressed_rules_catch_a_warning_laughter_and_a_request_to_think():
 def test_addressed_rules_stay_out_of_ordinary_questions():
     """A rule hit wins over the mood call, so a rule that misfires is a wrong gesture the
     model could have avoided. Dragons are the game's name and its subject matter, not a
-    threat on their own."""
+    threat on their own. Asking Rocky to keep watch is a plain request at a heist table,
+    not a warning, and putting a quarrel behind us is not a threat behind us."""
     for line in ("Rocky, what do you know about dragons?", "Rocky, do you like Dungeons and Dragons?",
                  "Rocky, is this door dangerous?", "Rocky, what is behind the door?",
-                 "Aha, Rocky, the key!", "Rocky, tell me a joke", "Rocky, poor Tomas is dead"):
-        assert addressed_mood(line) == "attentive", line
+                 "Aha, Rocky, the key!", "Rocky, tell me a joke", "Rocky, poor Tomas is dead",
+                 "Rocky, keep a look out for guards.", "Rocky, look out for traps in the next room.",
+                 "Rocky, watch out for the city watch while we pick the lock.", "Rocky, keep a look out.",
+                 "Rocky, look out the window.", "Rocky, lets put that behind us.",
+                 "Rocky, we left the guards behind us.", "Rocky, you are too clever by half."):
+        assert addressed_mood(line) is None, line
 
 
 def test_tracking_and_glance_items():
@@ -87,12 +95,12 @@ def test_choreographer_asks_the_classifier_when_no_rule_matches_and_rate_limits(
         calls.append(text); return "thoughtful"
     c = Choreographer(persona(tmp_path), min_gap_s=6.0, reaction_gap_s=0.0,
                       clock=lambda: now["t"], mood_classifier=classify)
-    items = c.for_addressed("Rocky, roll a d20", now["t"])
+    items = c.for_addressed("Rocky, hello", now["t"])
     assert [json.loads(i["arguments"])["emotion"] for i in items] == ["thinking"]
-    assert calls == ["Rocky, roll a d20"]
+    assert calls == ["Rocky, hello"]
     now["t"] += 2
     assert c.for_addressed("Rocky, again", now["t"]) == []          # inside the gap
-    assert calls == ["Rocky, roll a d20"]                            # no mood call inside the gap
+    assert calls == ["Rocky, hello"]                                 # no mood call inside the gap
     now["t"] += 5
     assert len(c.for_addressed("Rocky, again", now["t"])) == 1       # gap elapsed
 
@@ -110,7 +118,8 @@ def test_choreographer_falls_back_when_classifier_fails_or_answers_nonsense(tmp_
 def test_addressed_rule_hit_wins_and_skips_the_mood_call(tmp_path: Path):
     """Live, the mood call answered attentive to praise, an opinion question and a
     warning alike, and a valid answer used to beat the rules, so the rules never fired.
-    A rule hit for any mood but the default now decides, and costs no round trip."""
+    Any rule hit now decides and costs no round trip, a roll included: a roll is the
+    commonest thing asked of Rocky, and live the call answered it attentive anyway."""
     asked = []
     def classify(text):
         asked.append(text); return "sad"
@@ -123,8 +132,8 @@ def test_addressed_rule_hit_wins_and_skips_the_mood_call(tmp_path: Path):
     assert emotion("Rocky, that is hilarious") == ["happy"]
     assert asked == []
     assert emotion("Rocky, poor Tomas is dead") == ["sad"]           # no rule: the call decides
-    assert emotion("Rocky, roll me a d20.") == ["sad"]               # a rule for the default mood does not win
-    assert asked == ["Rocky, poor Tomas is dead", "Rocky, roll me a d20."]
+    assert emotion("Rocky, roll me a d20.") == ["attentive"]         # the roll rule wins too
+    assert asked == ["Rocky, poor Tomas is dead"]
 
 
 def test_addressed_turn_is_never_silent_when_the_rule_mood_has_no_gesture(tmp_path: Path):

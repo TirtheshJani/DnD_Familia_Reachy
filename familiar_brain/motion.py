@@ -47,16 +47,25 @@ TABLE_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b(funeral|farewell|grief|mourn(s|ing)?|weep(s|ing)?|in tears|passed away)\b", re.I), "sad"),
 )
 
-# ADDRESSED turns. A hit for any mood but the default wins over the one-token mood call,
-# because live the call answered attentive to praise, an opinion question and a warning
-# alike. Winning means a misfire is a wrong gesture the model might have avoided, so each
-# rule holds only phrases that carry their mood wherever they appear: a bare "dragon" is
-# the game's name and its subject, not a threat, and is left to the call. Order matters;
-# a warning outranks a request for an opinion in the same line.
+# A warning shouted at Rocky. "Look out" and "watch out" count only where the warning ends,
+# at a stop, a comma, the end of the line or "behind": "keep a look out for guards" and
+# "look out the window" are plain requests at a heist table. "Behind us" counts unless the
+# line puts or leaves something there ("let's put that behind us").
+_WARNING = (r"(?<!keep a )\b(look|watch) out\b(?=\s*([,.!?]|$|behind\b))"
+            r"|\bdanger\b"
+            r"|^(?!.*\b(put|putting|leave|leaving|left)\b).*\bbehind us\b")
+
+# ADDRESSED turns. Any rule hit wins over the one-token mood call, because live the call
+# answered attentive to praise, an opinion question and a warning alike; a roll wins too,
+# as the commonest request and one the call answered attentive anyway, so it costs no
+# round trip. Winning means a misfire is a wrong gesture the model might have avoided, so
+# each rule holds only phrases that carry their mood wherever they appear: a bare "dragon"
+# is the game's name and its subject, not a threat, and is left to the call. Order
+# matters; a warning outranks a request for an opinion in the same line.
 ADDRESSED_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"\b(look out|watch out|behind us|danger)\b", re.I), "alarmed"),
+    (re.compile(_WARNING, re.I), "alarmed"),
     (re.compile(rf"\b({_LAUGHTER}|(good|great|funny) joke)\b", re.I), "amused"),
-    (re.compile(r"\b(good (boy|girl|job)|well done|clever)\b", re.I), "proud"),
+    (re.compile(r"\b(good (boy|girl|job)|well done|clever(?! by half))\b", re.I), "proud"),
     (re.compile(r"\b(what do you (think|make|reckon)|thoughts|opinion|help me think|think with me)\b", re.I), "thoughtful"),
     (re.compile(r"\broll\b", re.I), "attentive"),
 )
@@ -70,11 +79,11 @@ def table_mood(text: str) -> str | None:
     return None
 
 
-def addressed_mood(text: str) -> str:
+def addressed_mood(text: str) -> str | None:
     for pattern, mood in ADDRESSED_RULES:
         if pattern.search(text):
             return mood
-    return DEFAULT_ADDRESSED_MOOD
+    return None
 
 
 def tracking_item(enabled: bool) -> dict:
@@ -129,14 +138,14 @@ class Choreographer:
     def for_addressed(self, text: str, now: float) -> list[dict]:
         """The gesture for the mood Rocky answers in, or nothing inside the gap.
 
-        Rules first: a hit for a mood other than the default, with a gesture configured,
-        decides and skips the mood call. Otherwise the call decides when it answers a
-        mood this persona has a gesture for, and anything else is the default.
+        Rules first: a hit for a mood with a gesture configured decides and skips the
+        mood call. Otherwise the call decides when it answers a mood this persona has a
+        gesture for, and anything else is the default.
         """
         if now - self.last_at < self.min_gap_s:
             return []
         mood = addressed_mood(text)
-        if mood == DEFAULT_ADDRESSED_MOOD or mood not in self.persona.gestures:
+        if mood not in self.persona.gestures:  # no rule matched, or no gesture for its mood
             mood = DEFAULT_ADDRESSED_MOOD
             if self.mood_classifier is not None:
                 try:
