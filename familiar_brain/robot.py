@@ -46,7 +46,10 @@ class RobotDaemon:
             if not isinstance(payload, dict) or "angle" not in payload:
                 return None
             # Inside the try: an angle that is not a number is a failure like any other.
-            return float(payload["angle"]), bool(payload.get("speech_detected", False))
+            angle = float(payload["angle"])
+            if not math.isfinite(angle):  # NaN maps to "front" and would spend a glance
+                return None
+            return angle, bool(payload.get("speech_detected", False))
         except Exception as e:
             log.debug("doa unavailable: %s", type(e).__name__)
             return None

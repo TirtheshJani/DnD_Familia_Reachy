@@ -47,5 +47,6 @@ def test_doa_never_calls_the_network_when_unconfigured():
 
 
 def test_doa_degrades_to_none_on_a_malformed_angle():
-    for payload in ({"angle": None}, {"angle": "left"}, {"angle": [1.0]}, [0.3, True]):
+    for payload in ({"angle": None}, {"angle": "left"}, {"angle": [1.0]}, [0.3, True],
+                    {"angle": float("nan")}, {"angle": float("inf")}, {"angle": "nan"}):
         assert RobotDaemon("http://r", get=lambda u, timeout, p=payload: _Resp(p)).doa() is None
