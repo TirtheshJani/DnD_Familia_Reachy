@@ -31,11 +31,20 @@ one per request, each with a `"decision"` field.
 
 ## Probes (in order)
 
-P0. Tool-result echoes. Say a line that is not addressed to Rocky. In data/brain.log
-    count the timing lines it produced. One line (`"decision": "IGNORE"`) means the
-    app does not return idle_do_nothing's result; two (IGNORE then ECHO) means it does
-    and the empty response closed it. Either is fine. A third line, or speech, is a
-    defect.
+P0. Tool-result echoes. The brain sends idle_do_nothing only on a turn with nothing
+    else to send, and the first line not addressed to Rocky has a glance whenever the
+    daemon answers the DoA read (it did on 2026-09-16), plus "head tracking off" if
+    the app's greeting switched tracking on. Glances go out at most once per
+    glance_gap_s (12 s in config/brain.toml), so use two lines. With
+    `tail -f data/brain.log` open in WSL, say a short line not addressed to Rocky
+    ("pass the crisps") and let the log settle. Three to five seconds later say a second
+    ("cheers, thanks"). Keep both under five words and away from dice, crits, laughter,
+    anyone going down, and grief, all of which earn a reaction. Judge only the second
+    line, from what brain.log adds after it. It must log no "head tracking", "glance"
+    or "gesture" line; if it does, say another such line at once and judge that one.
+    Then count its timing lines. One (`"decision": "IGNORE"`) means the app does not
+    return idle_do_nothing's result; two (IGNORE then ECHO) means it does and the empty
+    response closed it. Either is fine. A third line, or speech, is a defect.
 
 P1. Gesture plus speech in one response. "Rocky, what do you make of the smell?"
     Expect: head turns to you, an expression plays, then Rocky speaks. brain.log shows
@@ -43,13 +52,16 @@ P1. Gesture plus speech in one response. "Rocky, what do you make of the smell?"
     speaks, speech-to-speech dropped the text after a tool call: record it and stop.
 
 P2. Tracking hands back. Stay quiet for follow_up_window_s + tracking_linger_s (8 + 4
-    seconds in config/brain.toml today), then say any table line. brain.log shows
-    "head tracking off". Say a line from the left of the robot: expect "glance left"
-    and a head turn. The DoA payload shape the brain reads, `{"angle": <rad>,
-    "speech_detected": <bool>}`, was confirmed against the live daemon on 2026-09-16
-    (angle 2.39 rad, speech_detected false, nobody speaking). If the head does not
-    move, GET http://10.0.0.100:8000/api/state/doa by hand while speaking from the left
-    and record the payload: 0 is left, pi/2 front, pi right.
+    seconds in config/brain.toml today), then stand on the robot's own left (your right
+    as you face it) and say a table line that does not name Rocky. That one line must
+    log both "head tracking off" and "glance left", and the head turns towards you. It
+    has to be this line: it spends the glance, and a line within glance_gap_s (12 s) of
+    a glance earns none. To try again, wait 12 s first. The DoA payload shape the brain
+    reads, `{"angle": <rad>, "speech_detected": <bool>}`, was confirmed against the
+    live daemon on 2026-09-16 (angle 2.39 rad, speech_detected false, nobody speaking).
+    If brain.log shows no glance, or one the wrong way, GET
+    http://10.0.0.100:8000/api/state/doa by hand while speaking from the left and record
+    the payload: 0 is left, pi/2 front, pi right.
 
 P3. Narration reactions. Read three lines as the Dungeon Master, at least fifteen
     seconds apart, none naming Rocky:
@@ -58,10 +70,15 @@ P3. Narration reactions. Read three lines as the Dungeon Master, at least fiftee
       b. "She folds the letter and does not read the rest aloud."
          Expect the sad move.
       c. "You walk for an hour along the river road."
-         Expect nothing; brain.log shows the reaction call answered 'none'.
+         Expect nothing; brain.log shows the reaction call answered 'none'. Straight
+         away, within 12 s, read c once more: brain.log shows its reaction call and no
+         glance.
     Then read a and b again ten seconds apart: the second one must produce no
-    reaction (reaction_gap_s). Record the `preface_ms` figure from the timing lines. If
-    it is over 100 ms, or if c reacts, note it: D9's reversal applies.
+    reaction (reaction_gap_s). Record the `preface_ms` figures from the timing lines.
+    preface_ms also covers the DoA read behind a glance, up to doa_timeout_s (0.15 s)
+    over Wi-Fi, and lines fifteen seconds apart each glance. The repeat of c makes the
+    reaction call without a glance, so its figure is the one to judge. If it is over
+    100 ms, or if c reacts, note it: D9's reversal applies.
 
 P4. Sight. "Rocky, what do you see?" The brain does not log the tool calls it relays,
     so the camera call shows up when its frame comes back: expect a timing line with
