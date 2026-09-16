@@ -369,3 +369,75 @@ def test_a_mute_disarms_a_pending_speak_now(env):
     client.post("/api/mute")
     client.post("/api/unmute")
     assert "response.output_text.delta" not in _types(_turn(client, [_msg("user", "moving on then")]))
+
+
+def test_the_tool_follow_up_prefetch_is_answered_empty_and_changes_nothing(env):
+    """Live, the prefetch after every gestured reply was gated as a new ADDRESSED turn: a
+    second mood call and gesture, retrieval and a full Gemma generation nobody heard, run
+    while the reply was still being synthesised."""
+    client, fake, tmp, app = env
+    client.post("/api/session/start")
+    line = _msg("user", "Understudy, hello")
+    _turn(client, [SYSTEM, line])
+    bs = app.extensions["brain_state"]
+    snapshot = lambda: (list(bs.recent_segments), bs.last_named_at, bs.follow_ups, bs.tracking,
+                        bs.last_spoke_at, choreo_calls())
+    choreo_calls = lambda: len([r for r in fake.requests if r["path"].endswith("/chat/completions")])
+    before, requests_before = snapshot(), len(fake.requests)
+    log_before = next((tmp / "sessions").glob("*.jsonl")).read_text()
+    prefetch = [SYSTEM, line, *_pair("head_tracking", {"enabled": True}, "call_t", {"status": "following"}),
+                *_pair("play_emotion", {"emotion": "attentive"}, "call_e", {"status": "queued"}),
+                _msg("assistant", "Evening.")]
+    resp = _turn(client, prefetch)
+    assert _types(resp)[-1] == "response.completed" and _calls(resp) == []
+    assert "response.output_text.delta" not in _types(resp)
+    assert len(fake.requests) == requests_before and snapshot() == before
+    assert next((tmp / "sessions").glob("*.jsonl")).read_text() == log_before
+    # A real line after the reply is still a turn.
+    assert "response.output_text.delta" in _types(_turn(client, [*prefetch, _msg("user", "Understudy, and the door?")]))
+
+
+COMPACTION = [{"type": "message", "role": "system", "content": [{"type": "input_text", "text": "You are a conversation memory compressor."}]},
+              _msg("user", "Summarize the following conversation.  Return only the JSON object.\n\n"
+                           "--- CONVERSATION START ---\nUser: Understudy, help me think through the heist.\n\n"
+                           "Assistant: Start with the guards.\n--- CONVERSATION END ---")]
+
+
+def test_history_compaction_goes_upstream_untouched_and_touches_no_state(env):
+    """Gated, a transcript that named the familiar opened the follow-up window and "help me
+    think" switched on thinking mode; answered in persona, the summary was not JSON."""
+    client, fake, tmp, app = env
+    client.post("/api/session/start")
+    fake.responses_json.append({"id": "resp_c", "object": "response", "status": "completed", "created_at": 0,
+                                "model": "familiar", "output": [{"type": "message", "role": "assistant",
+                                "content": [{"type": "output_text", "text": "{\"user_summary\": \"x\"}"}]}]})
+    resp = client.post("/v1/responses", json={"model": "familiar", "input": COMPACTION})
+    assert resp.get_json()["id"] == "resp_c"
+    sent = fake.requests[-1]["body"]
+    assert sent["input"] == COMPACTION and "instructions" not in sent and "tools" not in sent
+    assert [r for r in fake.requests if r["path"].endswith("/chat/completions")] == []
+    bs = app.extensions["brain_state"]
+    assert bs.last_named_at is None and bs.mode == "familiar" and bs.recent_segments == []
+    assert next((tmp / "sessions").glob("*.jsonl")).read_text() == ""
+
+
+def test_the_mood_call_before_a_reply_waits_at_most_half_a_second(env, monkeypatch):
+    """It runs before the first word. Under GPU contention it took 600 to 900 ms, and with
+    the gate's 1.5 s budget a reply could wait that long for a facial expression."""
+    import requests as rq
+    client, _fake, _tmp, app = env
+    real, seen = rq.post, []
+
+    def spy(url, *a, **kw):
+        if url.endswith("/chat/completions"):
+            seen.append((kw["json"]["messages"][0]["content"], kw.get("timeout")))
+        return real(url, *a, **kw)
+
+    monkeypatch.setattr(rq, "post", spy)
+    _turn(client, [_msg("user", "Understudy, hello there")])
+    app.extensions["brain_state"].last_named_at -= 60   # past the window, so the gate asks
+    _turn(client, [_msg("user", "the innkeeper wipes down the long oak bar")])
+    mood = [t for prompt, t in seen if prompt.startswith("You choose the facial expression")]
+    gate = [t for prompt, t in seen if prompt.startswith("You are a strict filter")]
+    assert mood and all(t <= 0.5 for t in mood)
+    assert gate == [1.0]                        # the gate keeps its configured budget

@@ -60,6 +60,12 @@ ASLEEP, AWAKE = "asleep", "awake"
 # attention.py), plus stop_emotion, the other gesture tool the app offers the model.
 GESTURE_TOOLS = frozenset({"play_emotion", "head_tracking", "move_head", "stop_emotion", IDLE_TOOL})
 
+# The longest an addressed turn waits for its mood call before speaking. The call runs
+# ahead of the first word; under GPU contention it took 600 to 900 ms, and on the gate's
+# budget (classify_timeout_s, 1.5 s) a reply could wait that long for a facial expression.
+# Past this the turn goes out with the default mood. The gate keeps its own budget.
+MOOD_TIMEOUT_S = 0.5
+
 # How soon after an utterance a request with the same history can still be a revision of
 # it. speech-to-speech reopens a turn after a pause of up to 7 s (unanswered_reopen_ms),
 # and the player may talk on for a while before the revision is sent. Past this, the
@@ -196,10 +202,13 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
     # asleep and awake are the mute and unmute cues, played by Choreographer.cue. Offered
     # to the mood call they would let an ordinary reply go out looking like a mute.
     reply_moods = tuple(m for m in persona.gestures if m not in (ASLEEP, AWAKE))
+    mood_llm = LLMClient(base_url=cfg.upstream.base_url, classify_slot=cfg.upstream.classify_slot,
+                         classify_timeout_s=min(cfg.upstream.classify_timeout_s, MOOD_TIMEOUT_S),
+                         generate_slot=cfg.upstream.generate_slot)
     choreo = Choreographer(
         persona, min_gap_s=cfg.motion.min_gesture_gap_s, reaction_gap_s=cfg.motion.reaction_gap_s,
         clock=time.time,
-        mood_classifier=lambda t: llm.mood(t, moods=reply_moods),
+        mood_classifier=lambda t: mood_llm.mood(t, moods=reply_moods),
         reaction_classifier=lambda t: llm.mood(t, moods=REACTION_MOODS + ("none",), prompt=REACTION_INSTRUCTION),
     )
     attention = Attention(state=state, doa=robot.doa, follow_up_window_s=cfg.gate.follow_up_window_s,
@@ -333,6 +342,18 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
         model = str(req.get("model") or "familiar")
         now = time.time()
         kind = continuation_kind(req)
+        if kind == "compaction":
+            # Not the table talking: passed through as it came, with no persona, brain tools,
+            # gate, state or log. Gated, a transcript that named the familiar opened the
+            # follow-up window; in persona, the summary came back as prose, not JSON.
+            timer.finish(decision="COMPACTION", spoke=False)
+            try:
+                if wants_stream(req):
+                    return Response(stream_with_context(upstream.stream(req)), content_type="text/event-stream")
+                return jsonify(upstream.complete(req))
+            except Exception as e:  # speech-to-speech keeps its history unchanged on failure
+                app.logger.error("compaction passthrough failed: %s", e)
+                return jsonify(response_json([], model=model))
         if kind == "echo":
             # The client handing back a robot-side tool's result. Nothing was said, so
             # nothing is gated, logged or spoken. The empty reply carries no tool call,

@@ -10,6 +10,9 @@ CAMERA_TOOL = "camera"
 # The conversation app opens a session by asking the model for a greeting with this
 # exact prompt (prompts.py DEFAULT_GREETING_PROMPT). It is not a table utterance.
 GREETING_MARKER = "Start the conversation now"
+# speech-to-speech compacts history by asking the model for a JSON summary of a rendered
+# transcript (LLM/compaction_prompt.py COMPACTION_USER_TEMPLATE, 1.0.0).
+COMPACTION_MARKER = "--- CONVERSATION START ---"
 
 
 def _text_of(content) -> str:
@@ -42,7 +45,13 @@ def continuation_kind(req: dict) -> str | None:
     "echo":     the client returned the output of another robot-side tool (the app
                 requests a response after idle_do_nothing and camera, which keep
                 needs_response=True). Answer with nothing; it cannot loop.
+                The tool follow-up prefetch is one too: speech-to-speech asks again after
+                every tool output, with each output moved next to its call
+                (Chat._with_adjacent_tool_outputs), so the request ends on the assistant's
+                own reply. Gated as an utterance it ran a second, unheard generation.
     "greeting": the app's session-open greeting prompt.
+    "compaction": speech-to-speech summarising its history. The transcript quotes the
+                table and the greeting prompt, so it is checked before the greeting.
     Shapes from huggingface_realtime.py (app 1.0.1) and docs/protocol-notes.md 4 and 6.
     """
     items = req.get("input")
@@ -53,8 +62,12 @@ def continuation_kind(req: dict) -> str | None:
     last = items[-1]
     if not isinstance(last, dict):
         return None
+    if last.get("role") == "assistant":
+        return "echo"
     if last.get("role") == "user":
         content = last.get("content")
+        if COMPACTION_MARKER in _text_of(content):
+            return "compaction"
         if isinstance(content, list):
             kinds = {p.get("type") for p in content if isinstance(p, dict)}
             if "input_image" in kinds and not kinds & {"input_text", "text"}:

@@ -196,3 +196,36 @@ def test_malformed_or_missing_input_is_not_a_continuation():
     assert continuation_kind({"input": [{"role": "user", "content": "hi"}, None]}) is None
     # The Responses API also accepts a bare string as the whole input.
     assert continuation_kind({"input": "Rocky, hello"}) is None
+
+
+# --- requests speech-to-speech makes that are not a line from the table ---
+
+def _fc(name: str, call_id: str) -> list[dict]:
+    return [{"type": "function_call", "call_id": call_id, "name": name, "arguments": "{}"},
+            {"type": "function_call_output", "call_id": call_id, "output": "{}"}]
+
+
+def test_the_tool_follow_up_prefetch_after_a_spoken_reply_is_an_echo():
+    """speech-to-speech speculatively asks again after every tool output, with each output
+    moved next to its call, so the request ends on the assistant's own reply."""
+    req = {"input": [{"role": "user", "content": "Rocky, hello"}, *_fc("head_tracking", "call_a"),
+                     *_fc("play_emotion", "call_b"),
+                     {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Evening."}]}]}
+    assert continuation_kind(req) == "echo"
+    assert continuation_kind({"input": [*req["input"][:-1], {"role": "assistant", "content": "Evening."}]}) == "echo"
+
+
+def test_a_line_after_the_assistant_reply_is_still_an_utterance():
+    req = {"input": [{"role": "user", "content": "Rocky, hello"},
+                     {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Evening."}]},
+                     {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "And the door?"}]}]}
+    assert continuation_kind(req) is None
+
+
+def test_history_compaction_is_its_own_kind_even_when_it_quotes_the_greeting():
+    transcript = ("Summarize the following conversation.  Return only the JSON object.\n\n"
+                  "--- CONVERSATION START ---\nUser: " + GREETING_MARKER + " with a brief greeting.\n\n"
+                  "Assistant: Evening.\n--- CONVERSATION END ---")
+    req = {"input": [{"role": "system", "content": "You are a conversation memory compressor."},
+                     {"role": "user", "content": transcript}]}
+    assert continuation_kind(req) == "compaction"

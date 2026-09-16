@@ -54,7 +54,7 @@ class FakeLLM:
                     ]
                     self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.end_headers()
                     for ev in events:
-                        self.wfile.write(f"event: {ev['type']}\ndata: {json.dumps(ev)}\n\n".encode()); self.wfile.flush()
+                        self.wfile.write(f"event: {ev['type']}\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n".encode("utf-8")); self.wfile.flush()
                 else:
                     self.send_response(404); self.end_headers()
         return H

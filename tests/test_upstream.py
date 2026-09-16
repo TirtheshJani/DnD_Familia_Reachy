@@ -198,3 +198,12 @@ def test_the_second_ask_keeps_the_brain_tool_results(fake):
     assert len(bodies) == 3 and "tools" in bodies[1] and "tools" not in bodies[2]
     assert bodies[2]["input"][-1]["type"] == "function_call_output" and bodies[2]["input"][-1]["call_id"] == "c1"
     assert any(e.get("delta") == "Seventeen." for e in evs)
+
+
+def test_utf8_text_from_llama_server_reaches_the_client_intact(fake):
+    """llama-server sends text/event-stream with no charset, so requests decoded it as
+    Latin-1 and an apostrophe reached text-to-speech as three garbage characters."""
+    fake.responses_events.append(_spoken("I’m sure — café."))
+    up = Upstream(base_url=fake.base_url, generate_slot=0, brain_tool_names=set())
+    evs = _events(list(up.stream({"input": [{"role": "user", "content": "hi"}], "stream": True})))
+    assert [e["delta"] for e in evs if e["type"] == "response.output_text.delta"] == ["I’m sure — café."]

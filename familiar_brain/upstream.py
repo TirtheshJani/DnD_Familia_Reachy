@@ -40,6 +40,9 @@ class Upstream:
         r = requests.post(f"{self.base_url}/responses", json=self._with_defaults(body, stream=True),
                           stream=True, timeout=self.timeout_s)
         r.raise_for_status()
+        # llama-server sends text/event-stream with no charset, for which requests assumes
+        # Latin-1, so an apostrophe in a reply reached text-to-speech as three characters.
+        r.encoding = "utf-8"
         return r
 
     def complete(self, req: dict) -> dict:
