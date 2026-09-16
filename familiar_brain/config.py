@@ -75,7 +75,8 @@ class Config:
     gate: Gate
     paths: Paths
     knowledge: Knowledge
-    # Both sections are optional so a brain.toml written before they existed still loads.
+    # Both sections are optional: load_config passes {} for a missing one, so a brain.toml
+    # written before they existed still loads.
     robot: Robot = Robot()
     motion: Motion = Motion()
 
