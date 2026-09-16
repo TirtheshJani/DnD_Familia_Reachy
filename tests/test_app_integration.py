@@ -205,3 +205,114 @@ def test_session_end_without_a_session_is_a_clean_error(env):
     resp = client.post("/api/session/end")
     assert resp.status_code == 409
     assert "no active session" in resp.get_json()["error"]
+
+
+# --- the history and revisions speech-to-speech sends, see docs/protocol-notes.md ---
+
+def _msg(role: str, text: str) -> dict:
+    part = "output_text" if role == "assistant" else "input_text"
+    return {"type": "message", "role": role, "content": [{"type": part, "text": text}]}
+
+
+def _pair(name: str, args: dict, call_id: str, output: dict) -> list[dict]:
+    return [{"type": "function_call", "call_id": call_id, "name": name, "arguments": json.dumps(args),
+             "id": f"fc_{call_id}", "status": "completed"},
+            {"type": "function_call_output", "call_id": call_id, "output": json.dumps(output)}]
+
+
+def _calls(resp) -> list[tuple[str, dict]]:
+    out = []
+    for l in resp.get_data(as_text=True).splitlines():
+        if l.startswith("data: "):
+            ev = json.loads(l[6:]); item = ev.get("item") or {}
+            if ev["type"] == "response.output_item.done" and item.get("type") == "function_call":
+                out.append((item["name"], json.loads(item["arguments"])))
+    return out
+
+
+def _turn(client, items: list[dict]):
+    resp = client.post("/v1/responses", json={"model": "familiar", "stream": True, "tools": [], "input": items})
+    resp.get_data()  # read the whole stream, as speech-to-speech does
+    return resp
+
+
+SYSTEM = _msg("system", "You are in a spoken conversation.")
+IMAGE = {"type": "message", "role": "user",
+         "content": [{"type": "input_image", "image_url": "data:image/jpeg;base64,/9j/AAA="}]}
+
+
+@pytest.mark.parametrize("stream", [True, False])
+def test_gesture_and_idle_calls_in_the_history_never_reach_the_model(env, stream):
+    """speech-to-speech records every call the brain sends ahead of the reply text. Left in,
+    that history taught Gemma to answer an addressed line with play_emotion and no speech."""
+    client, fake, _tmp, _app = env
+    kept_before = [SYSTEM, _msg("user", "Understudy, what do you see?"),
+                   *_pair("camera", {"question": "scene"}, "call_cam", {"image_attached": True}),
+                   IMAGE, _msg("assistant", "Four mortals and a great many dice."),
+                   _msg("user", "the door creaks")]
+    history = [*kept_before,
+               *_pair("idle_do_nothing", {}, "call_idle", {"status": "idle"}),
+               _msg("user", "Understudy, how are you?"),
+               *_pair("head_tracking", {"enabled": True}, "call_track", {"status": "following"}),
+               *_pair("play_emotion", {"emotion": "attentive"}, "call_emo", {"status": "queued"}),
+               _msg("assistant", "Content enough."),
+               *_pair("move_head", {"direction": "left"}, "call_look", {"status": "moved"}),
+               *_pair("stop_emotion", {}, "call_stop", {"status": "stopped"}),
+               _msg("user", "Understudy, and the mayor?")]
+    resp = client.post("/v1/responses", json={"model": "familiar", "stream": stream, "tools": [], "input": history})
+    resp.get_data()
+    sent = [r for r in fake.requests if r["path"].endswith("/responses")][-1]["body"]["input"]
+    assert sent == [*kept_before, _msg("user", "Understudy, how are you?"), _msg("assistant", "Content enough."),
+                    _msg("user", "Understudy, and the mayor?")]
+
+
+def test_a_revised_line_carries_the_preface_its_superseded_version_took(env):
+    """With smart_turn on, speech-to-speech asks for a reply at the first pause and, if the
+    player carries on, replaces that user message and asks again. It drops everything the
+    first response sent. The revision must still turn tracking on and gesture, even inside
+    the live 6 s gesture gap."""
+    client, _fake, _tmp, app = env
+    first = _calls(_turn(client, [SYSTEM, _msg("user", "Understudy, what's the DC?")]))
+    assert first == [("head_tracking", {"enabled": True}), ("play_emotion", {"emotion": "attentive"})]
+    revised = [SYSTEM, _msg("user", "Understudy, what's the DC? For the lock, I mean.")]
+    assert _calls(_turn(client, revised)) == first
+    assert _calls(_turn(client, revised[:1] + [_msg("user", "Understudy, what's the DC? For the lock, I mean it.")])) == first
+    # The next line follows a response the client did get, so it is a new turn: tracking is
+    # already on and the gesture gap holds.
+    delivered = [*revised,
+                 *_pair("head_tracking", {"enabled": True}, "call_track", {"status": "following"}),
+                 *_pair("play_emotion", {"emotion": "attentive"}, "call_emo", {"status": "queued"}),
+                 _msg("assistant", "Fifteen.")]
+    assert _calls(_turn(client, [*delivered, _msg("user", "Understudy, and the door?")])) == []
+    assert app.extensions["brain_state"].tracking is True
+
+
+def test_a_revised_line_after_mute_still_switches_tracking_off_and_plays_the_sleep_cue(env):
+    client, _fake, _tmp, app = env
+    hello = [SYSTEM, _msg("user", "Understudy, hello")]
+    assert ("head_tracking", {"enabled": True}) in _calls(_turn(client, hello))
+    heard = [*hello, *_pair("head_tracking", {"enabled": True}, "call_track", {"status": "following"}),
+             _msg("assistant", "Evening.")]
+    client.post("/api/mute")
+    expected = [("head_tracking", {"enabled": False}), ("play_emotion", {"emotion": "sleepy"})]
+    assert _calls(_turn(client, [*heard, _msg("user", "Natural twenty")])) == expected
+    assert _calls(_turn(client, [*heard, _msg("user", "Natural twenty! No wait, nineteen.")])) == expected
+    assert app.extensions["brain_state"].tracking is False
+
+
+def test_a_line_sent_with_no_history_is_never_a_revision(env):
+    """speech-to-speech always opens with the system message. A client that sends each line
+    bare would otherwise have every line taken for a revision of the one before."""
+    client, _fake, _tmp, _app = env
+    assert _calls(_turn(client, [_msg("user", "Understudy, what's the DC?")]))
+    assert _calls(_turn(client, [_msg("user", "Understudy, what's the DC? For the lock.")])) == []
+
+
+def test_the_same_history_long_after_is_not_a_revision(env, monkeypatch):
+    """A reconnect starts from the same system message, so the history alone cannot tell a
+    revision from a first line in a new connection; only a request soon after can be one."""
+    from familiar_brain import app as app_module
+    monkeypatch.setattr(app_module, "REVISION_WINDOW_S", 0.0)
+    client, _fake, _tmp, _app = env
+    assert _calls(_turn(client, [SYSTEM, _msg("user", "Understudy, what's the DC?")]))
+    assert _calls(_turn(client, [SYSTEM, _msg("user", "Understudy, what's the DC? For the lock.")])) == []

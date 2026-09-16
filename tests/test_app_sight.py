@@ -117,7 +117,8 @@ def test_continuations_never_touch_the_session_log_or_the_follow_up_state(env):
 
 
 def test_muted_brain_answers_no_frame_and_no_greeting_on_either_path(env):
-    client, fake, _, app = env
+    client, fake, tmp, app = env
+    client.post("/api/session/start")           # so a stray log line would have somewhere to go
     client.post("/api/mute")
     before = len(fake.requests)
     sight = _camera_round_trip("Rocky, what do you see?", "{\"image_attached\": true}")
@@ -127,13 +128,42 @@ def test_muted_brain_answers_no_frame_and_no_greeting_on_either_path(env):
     resp = client.post("/v1/responses", json=GREETING)
     assert "response.output_text.delta" not in _types(resp)
     assert _calls(resp) == [("play_emotion", {"emotion": "sleepy"})]   # the mute cue, no wake cue
+    resp = client.post("/v1/responses", json=sight)
+    assert _calls(resp) == [("idle_do_nothing", {})] and "response.output_text.delta" not in _types(resp)
     assert len(fake.requests) == before         # nothing reached llama-server
     assert app.extensions["brain_state"].tracking is False
+    assert _session_log(tmp) == ""              # a muted continuation is not a table line either
+
+
+def test_a_greeting_answered_without_streaming_leaves_no_wake_cue_behind(env):
+    """The JSON path has no preface, so a cue set for it would play on the next streamed
+    turn, whatever that turn was."""
+    client, fake, _, _ = env
+    client.post("/v1/responses", json={**GREETING, "stream": False})
+    fake.chat_replies.append("IGNORE")          # the gate; three words make no reaction call
+    assert _calls(_say(client, "pass the chips")) == [("idle_do_nothing", {})]
+
+
+def test_sight_continuation_keeps_the_camera_round_trip_and_drops_gesture_history(env):
+    client, fake, _, _ = env
+    question = {"role": "user", "content": [{"type": "input_text", "text": "Rocky, what do you see?"}]}
+    gestures = [
+        {"type": "function_call", "call_id": "call_t", "name": "head_tracking", "arguments": "{\"enabled\":true}"},
+        {"type": "function_call_output", "call_id": "call_t", "output": "{\"status\": \"following\"}"},
+        {"type": "function_call", "call_id": "call_e", "name": "play_emotion", "arguments": "{\"emotion\":\"thinking\"}"},
+        {"type": "function_call_output", "call_id": "call_e", "output": "{\"status\": \"queued\"}"},
+    ]
+    round_trip = _camera_round_trip("Rocky, what do you see?", "{\"image_attached\": true}")["input"][1:]
+    resp = client.post("/v1/responses", json={"model": "familiar", "stream": True, "tools": [],
+                                              "input": [question, *gestures, *round_trip]})
+    assert "response.output_text.delta" in _types(resp)
+    assert fake.requests[-1]["body"]["input"] == [question, *round_trip]
 
 
 def test_camera_frame_never_reaches_a_log_record_and_timing_names_the_continuation(env, caplog):
     """The frame must not reach brain.log either. The timing lines say SIGHT, ECHO and
-    GREETING, so gate-report, which counts ADDRESSED lines only, never scores them."""
+    GREETING, so gate-report's latency figures, which read ADDRESSED records only, never
+    include them. The camera question itself is still scored from the session log."""
     client, _, _, _ = env
     with caplog.at_level(logging.DEBUG):
         sight = _camera_round_trip("Rocky, what do you see?", "{\"image_attached\": true}")

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, request, stream_with_context
@@ -17,6 +20,7 @@ from familiar_brain.llm import REACTION_INSTRUCTION, LLMClient
 from familiar_brain.motion import REACTION_MOODS, Choreographer
 from familiar_brain.persona import load_persona, render_system_prompt
 from familiar_brain.responses_api import (
+    IDLE_TOOL,
     continuation_kind,
     empty_response_events,
     idle_items,
@@ -51,6 +55,71 @@ from familiar_brain.upstream import Upstream
 
 # The persona moods played as cues when the brain is muted and unmuted.
 ASLEEP, AWAKE = "asleep", "awake"
+
+# Robot-side tools that only move Rocky: the ones the brain's preface sends (motion.py,
+# attention.py), plus stop_emotion, the other gesture tool the app offers the model.
+GESTURE_TOOLS = frozenset({"play_emotion", "head_tracking", "move_head", "stop_emotion", IDLE_TOOL})
+
+# How soon after an utterance a request with the same history can still be a revision of
+# it. speech-to-speech reopens a turn after a pause of up to 7 s (unanswered_reopen_ms),
+# and the player may talk on for a while before the revision is sent. Past this, the
+# same history is more likely a new connection starting from the same system message.
+REVISION_WINDOW_S = 30.0
+
+
+@dataclass(frozen=True)
+class _PrefaceStart:
+    """The one-shot state a preface spends, as it stood before the preface ran."""
+
+    tracking: bool
+    glance_at: float
+    gesture_at: float
+    reaction_at: float
+    cue: str | None
+
+
+def _without_gesture_calls(req: dict) -> dict:
+    """The request with every gesture and idle call, and its result, out of the history.
+
+    speech-to-speech records each call the brain sends ahead of the reply text, so from the
+    second turn on the history shows a model that answers with play_emotion before it
+    speaks. Gemma copies that. Against llama-server on 2026-09-16, with three earlier
+    addressed turns in the history, 5 of 6 replies to an addressed line were a bare
+    play_emotion call with no text, against 0 of 6 with the gesture pairs left out.
+    play_emotion needs no response, so Rocky gestured and said nothing. idle_do_nothing
+    goes too: it is the same brain-made call with no speech after it. Camera calls, their
+    results and the frame stay, or sight loses its image. Only the copy sent upstream
+    changes: continuation_kind reads the request as it came, so an echo is still an echo.
+    """
+    items = req.get("input")
+    if not isinstance(items, list):
+        return req
+
+    def is_gesture_call(item) -> bool:
+        return (isinstance(item, dict) and item.get("type") == "function_call"
+                and item.get("name") in GESTURE_TOOLS)
+
+    call_ids = {i.get("call_id") for i in items if is_gesture_call(i)} - {None}
+    kept = [i for i in items if not is_gesture_call(i)
+            and not (isinstance(i, dict) and i.get("type") == "function_call_output"
+                     and i.get("call_id") in call_ids)]
+    return {**req, "input": kept}
+
+
+def _history_key(req: dict) -> str | None:
+    """A digest of everything before the request's closing user message, used to recognise
+    a revision of the previous utterance.
+
+    None when the request does not close with a user message, or has nothing before it.
+    speech-to-speech always opens with the session's system message, so a bare message is
+    a client that sends no history (a probe, a test), where every line would otherwise
+    look like a revision of the one before.
+    """
+    items = req.get("input")
+    if not (isinstance(items, list) and len(items) > 1 and isinstance(items[-1], dict)
+            and items[-1].get("role") == "user"):
+        return None
+    return hashlib.sha256(json.dumps(items[:-1], sort_keys=True, default=str).encode()).hexdigest()
 
 
 def _correct_user_text(req: dict, lexicon: Lexicon) -> str:
@@ -174,6 +243,46 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
             app.logger.error("preface failed after %d item(s): %s", len(items), e)
         return items
 
+    # The last utterance's history key, when it came, and the state its preface started
+    # from. Only the streamed utterance path reads or writes it.
+    last_utterance: dict = {"key": None, "at": float("-inf"), "start": None}
+
+    def _preface_start() -> _PrefaceStart:
+        cue = state.consume_cue()  # BrainState has no peek; put it straight back
+        if cue:
+            state.set_cue(cue)
+        return _PrefaceStart(tracking=state.tracking, glance_at=state.last_glance_at,
+                             gesture_at=choreo.last_at, reaction_at=choreo.last_reaction_at, cue=cue)
+
+    def _rewind_if_revision(key: str | None, now: float) -> None:
+        """Put back what a superseded version of this utterance spent, before its revision's
+        preface runs.
+
+        With smart_turn on, speech-to-speech asks for a reply at the player's first pause.
+        If the player carries on inside its reopen window, it replaces that user message
+        with a transcript of the longer audio, asks again, and drops everything the first
+        response sent, gestures included. A preface spends state only once: a tracking
+        toggle goes out only on a change, a cue only once, and a gesture or glance starts
+        its gap. Without this the revision the robot does get carries none of them, so
+        Rocky never tracks for the whole exchange, or keeps following faces after a mute.
+
+        A revision has the same history before its last user message, because the message
+        is replaced in place and user messages carry no id on the wire. The line after any
+        other utterance has that utterance's own user message in its history, so it never
+        matches. A cue set since (a mute or unmute) wins over the one being put back.
+        """
+        previous = last_utterance["start"]
+        if (key is not None and key == last_utterance["key"] and previous is not None
+                and now - last_utterance["at"] < REVISION_WINDOW_S):
+            app.logger.info("revision of the previous utterance: preface state put back")
+            state.tracking = previous.tracking
+            state.last_glance_at = previous.glance_at
+            choreo.last_at = previous.gesture_at
+            choreo.last_reaction_at = previous.reaction_at
+            if previous.cue:
+                state.set_cue(state.consume_cue() or previous.cue)
+        last_utterance.update(key=key, at=now, start=_preface_start())
+
     def _without_streaming(req: dict, text: str, decision: Decision, timer: TurnTimer, model: str,
                            kind: str | None):
         """The client calls /v1/responses without `stream` for its warmup probe and for
@@ -188,7 +297,8 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
                 _log(text, decision, spoke=False)
             timer.finish(decision=label, spoke=False)
             return jsonify(idle_response_json(model=model))
-        outgoing = with_instructions_and_tools(req, instructions=_instructions(text, timer),
+        outgoing = with_instructions_and_tools(_without_gesture_calls(req),
+                                              instructions=_instructions(text, timer),
                                               extra_tools=tools.specs())
         try:
             body, spoke = upstream.complete(outgoing), True
@@ -232,8 +342,6 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
             # window: nobody at the table has said anything yet (compare deviation E7).
             text = ""
             decision = Decision.IGNORE if state.muted else Decision.ADDRESSED
-            if decision is Decision.ADDRESSED:
-                state.set_cue(AWAKE)
             timer.mark("gate")
         else:
             text = _correct_user_text(req, lexicon)
@@ -242,11 +350,17 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
             timer.mark("gate")
             modes.update_mode(state, text, addressed=decision is Decision.ADDRESSED,
                               now=now, timeout_s=cfg.motion.mode_timeout_s)
-        # SIGHT and GREETING in the timing line, so gate-report, which scores ADDRESSED
-        # lines only, never counts a camera round trip as a reply to the table.
+        # SIGHT and GREETING in the timing line, so gate-report's latency figures, which
+        # read ADDRESSED records only, never include a camera round trip or the greeting.
         label = decision.value if kind is None else kind.upper()
         if not wants_stream(req):
             return _without_streaming(req, text, decision, timer, model, kind)
+        if kind == "greeting" and decision is Decision.ADDRESSED:
+            # Set here, where this turn's preface spends it. A JSON greeting has no
+            # preface, so a cue set for it would play on whatever streamed turn came next.
+            state.set_cue(AWAKE)
+        if kind is None:
+            _rewind_if_revision(_history_key(req), now)
         preface = _preface(text, decision, now)
         # How long the mood or reaction call took, which D2 and D9 say to watch live.
         timer.mark("preface")
@@ -256,7 +370,8 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
             timer.finish(decision=label, spoke=False)
             body = "".join(sse(e) for e in tool_call_events(preface or idle_items()))
             return Response(body, content_type="text/event-stream")
-        outgoing = with_instructions_and_tools(req, instructions=_instructions(text, timer),
+        outgoing = with_instructions_and_tools(_without_gesture_calls(req),
+                                              instructions=_instructions(text, timer),
                                               extra_tools=tools.specs())
 
         def gen():
