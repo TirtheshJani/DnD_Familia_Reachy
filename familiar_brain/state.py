@@ -25,6 +25,16 @@ class BrainState:
         # was last addressed outright. A cap on top of the fixed deadline, so a rapid
         # exchange inside one window still hands back to the classifier.
         self.follow_ups = 0
+        # A gesture that must go out with the next response regardless of rate limits:
+        # the mute and unmute cues. Set by handlers, consumed by the responses route.
+        self._pending_cue: str | None = None
+        # What the brain last told the robot about head tracking. Toggles go out only
+        # on a change, so the app's MovementManager is never told the same thing twice.
+        self.tracking = False
+        self.last_glance_at: float = float("-inf")
+        # Reply mode, see modes.py. "familiar" is the two-sentence table default.
+        self.mode = "familiar"
+        self.mode_set_at: float | None = None
 
     def arm_speak_now(self) -> None:
         with self._lock:
@@ -34,6 +44,15 @@ class BrainState:
         with self._lock:
             armed, self._speak_now_armed = self._speak_now_armed, False
             return armed
+
+    def set_cue(self, mood: str) -> None:
+        with self._lock:
+            self._pending_cue = mood
+
+    def consume_cue(self) -> str | None:
+        with self._lock:
+            cue, self._pending_cue = self._pending_cue, None
+            return cue
 
     def mark_spoke(self, at: float | None = None) -> None:
         self.last_spoke_at = time.time() if at is None else at
