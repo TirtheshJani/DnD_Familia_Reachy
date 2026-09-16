@@ -19,6 +19,45 @@ class Decision(str, Enum):
 
 Classifier = Callable[[Sequence[str]], Decision]
 
+# A persona name can also be an ordinary word. "rocky" is an adjective, and a Dungeon
+# Master says "a rocky outcrop" or "the path is rocky" far more often than anyone talks
+# to Rocky, so a bare word match would wake it on narration. A match that reads as the
+# adjective is not a naming. That errs towards not naming on purpose: such a line still
+# falls through to the follow-up window and then the classifier, which knows the name
+# and can still judge "Rocky pass me the dice" as ADDRESSED.
+
+# A determiner or intensifier directly before the word: "a rocky", "very rocky".
+_ADJECTIVE_BEFORE = frozenset({"a", "an", "the", "very", "too", "quite", "pretty", "rather", "fairly"})
+# A copula directly before the word, but only when the word also ends the clause:
+# "the path is rocky." is the adjective, while "is Rocky awake?" and "where is Rocky?"
+# are about the familiar, which is why a question mark does not end the clause here.
+_COPULAS = frozenset({"is", "was", "are", "were", "be", "been", "looks", "seems", "gets", "got",
+                      "getting", "it's", "that's", "they're"})
+# A terrain-like noun directly after the word: "rocky ground", "a rocky start".
+_ADJECTIVE_AFTER = frozenset({
+    "terrain", "ground", "path", "paths", "road", "roads", "shore", "shores", "beach", "coast",
+    "cliff", "cliffs", "outcrop", "outcrops", "slope", "slopes", "hill", "hills", "ledge",
+    "ledges", "soil", "trail", "trails", "pass", "start", "patch", "floor", "walls", "cave",
+    "caves", "tunnel", "island", "crag", "crags",
+})
+_WORD_BEFORE = re.compile(r"([\w'\u2019]+)\s+$")
+_WORD_AFTER = re.compile(r"\s+(\w+)")
+_ENDS_CLAUSE = re.compile(r"\s*(?:[.!,;:]|$)")
+
+
+def _reads_as_adjective(text: str, match: re.Match[str]) -> bool:
+    # Only a single word has an adjective reading. A phrase alias such as "little one"
+    # is already a noun phrase, and "the little one" is how people say it.
+    if len(match.group(0).split()) > 1:
+        return False
+    before = _WORD_BEFORE.search(text[:match.start()])
+    before_word = before.group(1).lower().replace("\u2019", "'") if before else ""
+    after = text[match.end():]
+    after_word = _WORD_AFTER.match(after)
+    return (before_word in _ADJECTIVE_BEFORE
+            or (before_word in _COPULAS and _ENDS_CLAUSE.match(after) is not None)
+            or (after_word is not None and after_word.group(1).lower() in _ADJECTIVE_AFTER))
+
 
 class Gate:
     def __init__(self, *, state: BrainState, name: str, aliases: Sequence[str],
@@ -32,13 +71,21 @@ class Gate:
         self.clock = clock
         self.max_follow_ups = max_follow_ups
 
+    def _named(self, text: str) -> bool:
+        """In "Rocky, is the path rocky?" one naming use is enough to address the familiar."""
+        for match in self._pattern.finditer(text):
+            if not _reads_as_adjective(text, match):
+                return True
+            log.info("%r reads as an ordinary word here, not a naming", match.group(0))
+        return False
+
     def decide(self, segments: Sequence[str]) -> Decision:
         """segments: most recent last. Only the last segment is the candidate utterance."""
         if self.state.muted:
             return Decision.IGNORE
         last = segments[-1] if segments else ""
         now = self.clock()
-        if self.state.consume_speak_now() or self._pattern.search(last):
+        if self.state.consume_speak_now() or self._named(last):
             self.state.mark_named(now)
             return Decision.ADDRESSED
         # The window is anchored to naming, not to speech. Anchoring it to speech meant

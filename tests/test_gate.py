@@ -1,3 +1,5 @@
+import pytest
+
 from familiar_brain.state import BrainState
 from familiar_brain.gate import Gate, Decision
 
@@ -113,3 +115,75 @@ def test_classifier_exception_defaults_to_ignore():
     st = BrainState()
     g = Gate(state=st, name="U", aliases=(), follow_up_window_s=8.0, classifier=clf, clock=lambda: 0.0)
     assert g.decide(["mumble"]) == Decision.IGNORE
+
+
+def rocky():
+    """The live persona: config/persona.yaml names Rocky with the alias rocky, and the
+    lexicon has already turned Rockie, Rockey, Roki and Rocki into Rocky."""
+    seen = []
+
+    def clf(segments):
+        seen.append(segments[-1])
+        return Decision.IGNORE
+
+    st = BrainState()
+    g = Gate(state=st, name="Rocky", aliases=("rocky",), follow_up_window_s=8.0,
+             classifier=clf, clock=lambda: 0.0)
+    return st, g, seen
+
+
+@pytest.mark.parametrize("line", [
+    "The path ahead is rocky.",
+    "You climb a rocky outcrop.",
+    "the rocky shore stretches north",
+    "It's very rocky here",
+    "The ground is rocky, so watch your step",
+    "Rocky terrain slows you down",
+    "a rocky start to the negotiations",
+])
+def test_rocky_the_adjective_is_not_a_naming(line):
+    st, g, seen = rocky()
+    assert g.decide([line]) == Decision.IGNORE
+    assert seen == [line], "an adjective use must fall through to the classifier"
+    assert st.last_named_at is None
+
+
+@pytest.mark.parametrize("line", [
+    "Rocky, roll a d20",
+    "Hey Rocky",
+    "thanks Rocky",
+    "What do you think, Rocky?",
+    "Is Rocky awake?",
+    "Where is Rocky?",
+    "Rocky what do you see",
+    "ROCKY!",
+    "Rocky's turn to guess",
+    "good boy Rocky",
+    "Rocky, is the path rocky?",
+])
+def test_rocky_spoken_to_or_about_is_a_naming(line):
+    st, g, seen = rocky()
+    assert g.decide([line]) == Decision.ADDRESSED
+    assert seen == [], "a naming never reaches the classifier"
+    assert st.last_named_at == 0.0
+
+
+def test_adjective_use_falls_through_to_an_open_window_without_renaming():
+    """Inside an open window the line is still a follow-up, but it must not count as
+    naming: that would reset the follow-up cap and reopen the window from now."""
+    now = {"t": 0.0}
+    st = BrainState()
+    g = Gate(state=st, name="Rocky", aliases=("rocky",), follow_up_window_s=8.0,
+             classifier=lambda s: Decision.IGNORE, clock=lambda: now["t"])
+    assert g.decide(["Rocky, which way?"]) == Decision.ADDRESSED
+    now["t"] = 7.0
+    assert g.decide(["The path ahead is rocky."]) == Decision.ADDRESSED
+    assert st.last_named_at == 0.0 and st.follow_ups == 1
+
+
+def test_adjective_guard_applies_to_any_persona_name():
+    st = BrainState()
+    g = Gate(state=st, name="Sunny", aliases=(), follow_up_window_s=8.0,
+             classifier=lambda s: Decision.IGNORE, clock=lambda: 0.0)
+    assert g.decide(["The morning is sunny."]) == Decision.IGNORE
+    assert g.decide(["Sunny, what now?"]) == Decision.ADDRESSED
