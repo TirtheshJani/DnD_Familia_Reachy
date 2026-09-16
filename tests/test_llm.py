@@ -69,6 +69,20 @@ def test_mood_is_one_token_on_the_classify_slot_and_validated(fake):
     assert c.mood("anything", moods=("attentive", "thoughtful")) is None
 
 
+def test_mood_prompt_names_what_each_mood_answers_and_keeps_attentive_for_plain_requests(fake):
+    """Scored live on twelve labelled addressed lines. The wording that ended "Choose
+    attentive when nothing else clearly fits" got 6 of 12: attentive to praise, an
+    opinion question, a warning and a death. Saying what each mood answers got 11 of 12,
+    and still answered attentive to the roll, the greeting and the question of fact."""
+    c = LLMClient(base_url=fake.base_url, classify_slot=1, classify_timeout_s=1.0)
+    fake.chat_replies.append("proud")
+    c.mood("Good job Rocky, that was clever.", moods=("attentive", "proud", "sad"))
+    content = fake.requests[-1]["body"]["messages"][0]["content"]
+    assert "attentive: a plain request, a greeting, a question of fact" in content
+    assert "proud: praise or thanks" in content and "sad: bad news" in content
+    assert "nothing else clearly fits" not in content
+
+
 def test_reaction_prompt_is_selectable_and_none_is_a_valid_answer(fake):
     from familiar_brain.llm import REACTION_INSTRUCTION
     c = LLMClient(base_url=fake.base_url, classify_slot=1, classify_timeout_s=1.0)

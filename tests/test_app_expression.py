@@ -94,10 +94,10 @@ def _chat_calls(fake) -> list[dict]:
 
 def test_addressed_turn_is_prefaced_by_tracking_then_a_gesture_then_speech(env):
     client, fake, _, _ = env
-    fake.chat_replies.append("thoughtful")      # the mood call; classify is skipped on a named line
     resp = _say(client, "Rocky, what do you make of him?")
     calls = _calls(resp)
     assert calls == [("head_tracking", {"enabled": True}), ("play_emotion", {"emotion": "thinking"})]
+    assert _chat_calls(fake) == []              # a named line skips classify; a rule hit skips the mood call
     types = _types(resp)
     assert types.index("response.output_item.done") < types.index("response.output_text.delta")
 
@@ -181,8 +181,8 @@ def test_mode_api_and_phrase_change_the_length_block_sent_upstream(env):
 def test_mood_call_never_offers_the_sleep_and_wake_cues(env):
     """asleep and awake are the mute and unmute cues, not moods to answer in."""
     client, fake, _, _ = env
-    fake.chat_replies.append("thoughtful")      # the mood call; a named line skips classify
-    _say(client, "Rocky, what do you make of him?")
+    fake.chat_replies.append("attentive")       # the mood call; a named line skips classify
+    _say(client, "Rocky, hello")                # no rule matches, so the mood call is made
     [mood_call] = _chat_calls(fake)
     system = mood_call["messages"][0]["content"]
     assert "thoughtful" in system and "attentive" in system
@@ -220,8 +220,7 @@ def test_upstream_failure_after_the_preface_still_degrades_to_silence(env, monke
         yield  # a generator, like the real Upstream.stream
 
     monkeypatch.setattr(Upstream, "stream", down)
-    fake.chat_replies.append("thoughtful")      # the mood call
-    resp = _say(client, "Rocky, what do you make of him?")
+    resp = _say(client, "Rocky, what do you make of him?")  # a rule hit: no mood call
     assert "response.output_text.delta" not in _types(resp)
     assert _calls(resp) == [("head_tracking", {"enabled": True}), ("play_emotion", {"emotion": "thinking"}),
                             ("idle_do_nothing", {})]

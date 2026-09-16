@@ -53,6 +53,26 @@ def test_addressed_mood_rules_default_to_attentive():
     assert addressed_mood("Rocky, hello") == "attentive"
 
 
+def test_addressed_rules_catch_a_warning_laughter_and_a_request_to_think():
+    assert addressed_mood("Rocky, is that a dragon behind us?") == "alarmed"
+    assert addressed_mood("Rocky, look out!") == "alarmed" and addressed_mood("watch out, Rocky") == "alarmed"
+    assert addressed_mood("Rocky, are we in danger?") == "alarmed"
+    assert addressed_mood("Rocky, that is hilarious") == "amused" and addressed_mood("hahaha Rocky") == "amused"
+    assert addressed_mood("Rocky, good joke") == "amused"
+    assert addressed_mood("Rocky, help me think about the heist") == "thoughtful"
+    assert addressed_mood("Rocky, think with me about the cult") == "thoughtful"
+
+
+def test_addressed_rules_stay_out_of_ordinary_questions():
+    """A rule hit wins over the mood call, so a rule that misfires is a wrong gesture the
+    model could have avoided. Dragons are the game's name and its subject matter, not a
+    threat on their own."""
+    for line in ("Rocky, what do you know about dragons?", "Rocky, do you like Dungeons and Dragons?",
+                 "Rocky, is this door dangerous?", "Rocky, what is behind the door?",
+                 "Aha, Rocky, the key!", "Rocky, tell me a joke", "Rocky, poor Tomas is dead"):
+        assert addressed_mood(line) == "attentive", line
+
+
 def test_tracking_and_glance_items():
     t = tracking_item(True)
     assert t["name"] == "head_tracking" and json.loads(t["arguments"]) == {"enabled": True}
@@ -60,7 +80,7 @@ def test_tracking_and_glance_items():
     assert g["name"] == "move_head" and json.loads(g["arguments"]) == {"direction": "left"}
 
 
-def test_choreographer_uses_classifier_then_rules_and_rate_limits(tmp_path: Path):
+def test_choreographer_asks_the_classifier_when_no_rule_matches_and_rate_limits(tmp_path: Path):
     now = {"t": 100.0}
     calls = []
     def classify(text):
@@ -80,16 +100,41 @@ def test_choreographer_uses_classifier_then_rules_and_rate_limits(tmp_path: Path
 def test_choreographer_falls_back_when_classifier_fails_or_answers_nonsense(tmp_path: Path):
     c = Choreographer(persona(tmp_path), min_gap_s=0.0, reaction_gap_s=0.0, clock=lambda: 0.0,
                       mood_classifier=lambda t: (_ for _ in ()).throw(RuntimeError("down")))
+    assert json.loads(c.for_addressed("Rocky, hello", 0.0)[0]["arguments"]) == {"emotion": "attentive"}
     assert json.loads(c.for_addressed("Rocky, what do you think", 0.0)[0]["arguments"]) == {"emotion": "thinking"}
     c2 = Choreographer(persona(tmp_path), min_gap_s=0.0, reaction_gap_s=0.0, clock=lambda: 0.0,
                        mood_classifier=lambda t: "banana")
     assert json.loads(c2.for_addressed("Rocky, hello", 0.0)[0]["arguments"]) == {"emotion": "attentive"}
 
 
+def test_addressed_rule_hit_wins_and_skips_the_mood_call(tmp_path: Path):
+    """Live, the mood call answered attentive to praise, an opinion question and a
+    warning alike, and a valid answer used to beat the rules, so the rules never fired.
+    A rule hit for any mood but the default now decides, and costs no round trip."""
+    asked = []
+    def classify(text):
+        asked.append(text); return "sad"
+    c = Choreographer(persona(tmp_path), min_gap_s=0.0, reaction_gap_s=0.0, clock=lambda: 0.0,
+                      mood_classifier=classify)
+    def emotion(line):
+        return [json.loads(i["arguments"])["emotion"] for i in c.for_addressed(line, 0.0)]
+    assert emotion("Rocky, what do you make of the priest?") == ["thinking"]
+    assert emotion("Rocky, is that a dragon behind us?") == ["surprised"]
+    assert emotion("Rocky, that is hilarious") == ["happy"]
+    assert asked == []
+    assert emotion("Rocky, poor Tomas is dead") == ["sad"]           # no rule: the call decides
+    assert emotion("Rocky, roll me a d20.") == ["sad"]               # a rule for the default mood does not win
+    assert asked == ["Rocky, poor Tomas is dead", "Rocky, roll me a d20."]
+
+
 def test_addressed_turn_is_never_silent_when_the_rule_mood_has_no_gesture(tmp_path: Path):
     c = Choreographer(persona(tmp_path), min_gap_s=0.0, reaction_gap_s=0.0, clock=lambda: 0.0)
     items = c.for_addressed("good boy Rocky", 0.0)   # rules say proud; this persona has no proud gesture
     assert [json.loads(i["arguments"]) for i in items] == [{"emotion": "attentive"}]
+    c2 = Choreographer(persona(tmp_path), min_gap_s=0.0, reaction_gap_s=0.0, clock=lambda: 0.0,
+                       mood_classifier=lambda t: "amused")
+    items = c2.for_addressed("good boy Rocky", 0.0)  # a rule mood with no gesture leaves it to the call
+    assert [json.loads(i["arguments"]) for i in items] == [{"emotion": "happy"}]
 
 
 def test_table_reaction_uses_rules_first_and_cues_ignore_the_gap(tmp_path: Path):

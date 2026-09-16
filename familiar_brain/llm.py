@@ -32,10 +32,24 @@ CLASSIFY_INSTRUCTION = (
     "When in doubt answer IGNORE. Staying silent is always the safe choice."
 )
 
+# Scored against twelve labelled addressed lines on the live model. The earlier wording
+# ended "Choose attentive when nothing else clearly fits" and got 6 of 12: attentive to
+# praise, an opinion question, a warning and a death. One sentence naming the feelings to
+# match got 9 of 12. Saying what each mood answers gets 11 of 12, and 8 of 10 on ten more
+# lines it was not written against, while a roll, a greeting and a question of fact all
+# stay attentive. The descriptions name the shipped persona's moods; an answer a persona
+# has no gesture for is ignored and the turn goes out attentive (motion.for_addressed).
 MOOD_INSTRUCTION = (
     "You choose the facial expression of a small creature that has just been spoken to at a "
     "game of Dungeons and Dragons. Read the line and answer with exactly one word from this "
-    "list: {moods}. Choose attentive when nothing else clearly fits."
+    "list: {moods}.\n"
+    "amused: a joke, teasing, or laughter.\n"
+    "proud: praise or thanks.\n"
+    "thoughtful: it is asked for its opinion, or to help think something through.\n"
+    "alarmed: a warning, a sudden danger, or a shock.\n"
+    "sad: bad news, a death, or an unkind word.\n"
+    "attentive: a plain request, a greeting, a question of fact, or anything else.\n"
+    "A word from the list that is not described above fits only when the line clearly calls for it."
 )
 
 # The reaction call. The line was not spoken to Rocky; it is usually the Dungeon Master

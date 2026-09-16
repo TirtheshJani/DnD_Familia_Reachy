@@ -34,20 +34,30 @@ REACTION_MOODS: tuple[str, ...] = ("amused", "alarmed", "sad", "scared")
 # narration, and the keyword rules already cover short outbursts.
 MIN_REACTION_WORDS = 5
 
+# Laughter, shared by both rule sets: "hahaha", "ha ha", "ahaha", but not "Aha!".
+_LAUGHTER = r"a?(ha ?){2,}|hilarious"
+
 # Design section 5: a non-addressed line may emit one gesture chosen by a small keyword
 # rule set. These run before the reaction call and cost nothing.
 TABLE_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\b(nat(ural)? ?(one|1)|crit(ical)? ?fail(ure|ed|s)?|fumbl(e|ed|es|ing))\b", re.I), "alarmed"),
     (re.compile(r"\b(nat(ural)? ?(twenty|20)|crit(ical)?( hit)?)\b", re.I), "amused"),
     (re.compile(r"\b(went down|(he|she|they)('s|'re| is| are) (down|dead|dying)|get (him|her|them) up|unconscious)\b", re.I), "scared"),
-    (re.compile(r"\b(a?(ha ?){2,}|hilarious)\b", re.I), "amused"),
+    (re.compile(rf"\b({_LAUGHTER})\b", re.I), "amused"),
     (re.compile(r"\b(funeral|farewell|grief|mourn(s|ing)?|weep(s|ing)?|in tears|passed away)\b", re.I), "sad"),
 )
 
-# Fallback for ADDRESSED turns when the one-token mood call is unavailable or wrong.
+# ADDRESSED turns. A hit for any mood but the default wins over the one-token mood call,
+# because live the call answered attentive to praise, an opinion question and a warning
+# alike. Winning means a misfire is a wrong gesture the model might have avoided, so each
+# rule holds only phrases that carry their mood wherever they appear: a bare "dragon" is
+# the game's name and its subject, not a threat, and is left to the call. Order matters;
+# a warning outranks a request for an opinion in the same line.
 ADDRESSED_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b(look out|watch out|behind us|danger)\b", re.I), "alarmed"),
+    (re.compile(rf"\b({_LAUGHTER}|(good|great|funny) joke)\b", re.I), "amused"),
     (re.compile(r"\b(good (boy|girl|job)|well done|clever)\b", re.I), "proud"),
-    (re.compile(r"\b(what do you (think|make|reckon)|thoughts|opinion)\b", re.I), "thoughtful"),
+    (re.compile(r"\b(what do you (think|make|reckon)|thoughts|opinion|help me think|think with me)\b", re.I), "thoughtful"),
     (re.compile(r"\broll\b", re.I), "attentive"),
 )
 DEFAULT_ADDRESSED_MOOD = "attentive"
@@ -117,18 +127,26 @@ class Choreographer:
         return [item]
 
     def for_addressed(self, text: str, now: float) -> list[dict]:
+        """The gesture for the mood Rocky answers in, or nothing inside the gap.
+
+        Rules first: a hit for a mood other than the default, with a gesture configured,
+        decides and skips the mood call. Otherwise the call decides when it answers a
+        mood this persona has a gesture for, and anything else is the default.
+        """
         if now - self.last_at < self.min_gap_s:
             return []
-        mood: str | None = None
-        if self.mood_classifier is not None:
-            try:
-                mood = self.mood_classifier(text)
-            except Exception as e:  # a dead classify slot must not cost the gesture
-                log.warning("mood classifier failed (%s); using rules", type(e).__name__)
-        if mood not in self.persona.gestures:
-            mood = addressed_mood(text)
-            if mood not in self.persona.gestures:
-                mood = DEFAULT_ADDRESSED_MOOD
+        mood = addressed_mood(text)
+        if mood == DEFAULT_ADDRESSED_MOOD or mood not in self.persona.gestures:
+            mood = DEFAULT_ADDRESSED_MOOD
+            if self.mood_classifier is not None:
+                try:
+                    answer = self.mood_classifier(text)
+                except Exception as e:  # a dead classify slot must not cost the gesture
+                    log.warning("mood classifier failed (%s); using %s", type(e).__name__, mood)
+                    answer = None
+                log.info("mood call answered %r", answer)
+                if answer in self.persona.gestures:
+                    mood = answer
         return self._gated(mood, now)
 
     def for_table(self, text: str, now: float) -> list[dict]:
