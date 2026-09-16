@@ -55,3 +55,27 @@ def test_classify_timeout_raises(fake):
     c = LLMClient(base_url="http://127.0.0.1:9", classify_slot=1, classify_timeout_s=0.2)
     with pytest.raises(Exception):
         c.classify(["x"], persona_name="U")
+
+
+def test_mood_is_one_token_on_the_classify_slot_and_validated(fake):
+    c = LLMClient(base_url=fake.base_url, classify_slot=1, classify_timeout_s=1.0)
+    fake.chat_replies.append("Thoughtful.")
+    assert c.mood("Rocky, what do you make of him?", moods=("attentive", "thoughtful")) == "thoughtful"
+    body = fake.requests[-1]["body"]
+    assert body["id_slot"] == 1 and body["max_tokens"] == 4 and body["reasoning_effort"] == "none"
+    assert "attentive, thoughtful" in body["messages"][0]["content"]
+    assert "spoken to" in body["messages"][0]["content"]
+    fake.chat_replies.append("banana")
+    assert c.mood("anything", moods=("attentive", "thoughtful")) is None
+
+
+def test_reaction_prompt_is_selectable_and_none_is_a_valid_answer(fake):
+    from familiar_brain.llm import REACTION_INSTRUCTION
+    c = LLMClient(base_url=fake.base_url, classify_slot=1, classify_timeout_s=1.0)
+    fake.chat_replies.append("none")
+    moods = ("amused", "alarmed", "sad", "scared", "none")
+    assert c.mood("You walk for an hour along the road.", moods=moods, prompt=REACTION_INSTRUCTION) == "none"
+    content = fake.requests[-1]["body"]["messages"][0]["content"]
+    assert "not spoken to it" in content and "Most lines are none" in content
+    fake.chat_replies.append("Alarmed")
+    assert c.mood("The priest pulls back his hood: it is the king.", moods=moods, prompt=REACTION_INSTRUCTION) == "alarmed"

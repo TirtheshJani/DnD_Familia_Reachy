@@ -28,6 +28,28 @@ CLASSIFY_INSTRUCTION = (
     "When in doubt answer IGNORE. Staying silent is always the safe choice."
 )
 
+MOOD_INSTRUCTION = (
+    "You choose the facial expression of a small creature that has just been spoken to at a "
+    "game of Dungeons and Dragons. Read the line and answer with exactly one word from this "
+    "list: {moods}. Choose attentive when nothing else clearly fits."
+)
+
+# The reaction call. The line was not spoken to Rocky; it is usually the Dungeon Master
+# narrating or a player talking. The list passed in ends with "none" and the wording
+# pushes toward it, for the same reason CLASSIFY_INSTRUCTION pushes toward IGNORE: a
+# creature that reacts to everything reacts to nothing.
+REACTION_INSTRUCTION = (
+    "You choose the reaction of a small creature listening at a game of Dungeons and "
+    "Dragons. The line was not spoken to it; it is usually the Dungeon Master narrating or "
+    "a player talking. Answer with exactly one word from this list: {moods}.\n"
+    "amused: the line is funny, or a triumph for the party.\n"
+    "alarmed: a shocking twist, a sudden reveal, a betrayal.\n"
+    "sad: grief, loss, a farewell, something sorrowful.\n"
+    "scared: danger or a threat to the party, a monster, a trap springing.\n"
+    "none: ordinary description, travel, rules talk, dice, table logistics.\n"
+    "Most lines are none."
+)
+
 
 class LLMClient:
     def __init__(self, *, base_url: str, classify_slot: int, classify_timeout_s: float,
@@ -77,3 +99,28 @@ class LLMClient:
             if text.startswith(d.value):
                 return d
         raise ValueError(f"unparseable classifier output: {text!r}")
+
+    def mood(self, text: str, *, moods: tuple[str, ...], prompt: str = MOOD_INSTRUCTION) -> str | None:
+        """One word from `moods` for the gesture that goes out with a turn.
+
+        Same slot, budget and reasoning setting as classify: 59 ms measured live for one
+        token with reasoning off (docs/versions.md, gate classifier table; docs/deviations.md
+        E5). `prompt` selects the instruction; motion.py uses MOOD_INSTRUCTION for addressed
+        turns and REACTION_INSTRUCTION for table lines. Returns None for anything outside
+        the list so the caller falls back to its keyword rules.
+        """
+        body = {
+            "messages": [
+                {"role": "system", "content": prompt.format(moods=", ".join(moods))},
+                {"role": "user", "content": text},
+            ],
+            "max_tokens": 4,
+            "temperature": 0,
+            "stream": False,
+            "id_slot": self.classify_slot,
+            "reasoning_effort": "none",
+        }
+        r = requests.post(f"{self.base_url}/chat/completions", json=body, timeout=self.classify_timeout_s)
+        r.raise_for_status()
+        word = r.json()["choices"][0]["message"]["content"].strip().lower().strip(".,!\"'")
+        return word if word in moods else None
