@@ -1,3 +1,5 @@
+import os
+import time
 from pathlib import Path
 
 from familiar_brain.indexing import index_notes
@@ -9,10 +11,18 @@ def test_index_notes_skips_unchanged_and_reindexes_changed(tmp_path: Path):
     notes = tmp_path / "notes"; notes.mkdir()
     (notes / "pc.md").write_text("# PC\nDocks of Nephria.\n")
     (notes / "npcs.md").write_text("# Barkeep\nOwes gold.\n")
+    # Backdated, as a note from an earlier sitting would be. On Windows SQLite stamps
+    # created_at from GetSystemTimeAsFileTime cut to whole milliseconds, which can lag
+    # NTFS's precise mtime by a full timer tick (15.625 ms by default). A note written
+    # that close to the first pass looks newer than its own chunks, so the second pass
+    # re-indexed it once and this test failed intermittently. The error only runs that
+    # way: an edit saved after indexing always carries the later mtime.
+    earlier = time.time() - 60
+    for name in ("pc.md", "npcs.md"):
+        os.utime(notes / name, (earlier, earlier))
     store = Store(tmp_path / "k.db", embedder=FakeEmbedder())
     assert index_notes(store, notes) == {"indexed": 2, "skipped": 0}
     assert index_notes(store, notes) == {"indexed": 0, "skipped": 2}
-    import os, time
     (notes / "pc.md").write_text("# PC\nNow lives uptown.\n")
     os.utime(notes / "pc.md", (time.time() + 5, time.time() + 5))
     assert index_notes(store, notes) == {"indexed": 1, "skipped": 1}
