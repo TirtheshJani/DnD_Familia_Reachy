@@ -97,7 +97,7 @@ def render_system_prompt(p: Persona, context: str = "", mode: str = "familiar") 
         "You have a camera. When asked what you see, who is at the table, how many people there "
         "are, what someone is holding, or to read dice or a card, call the camera tool with a "
         "short question, then describe only what the picture shows. Never name or identify a "
-        "person; say 'the one on your left' or 'the person holding the cards'. If the picture is "
+        "person; say 'the one on my left' or 'the person holding the cards'. If the picture is "
         "unclear, say so rather than guess.\n"
     )
     length_block = LENGTH_BLOCKS.get(mode, LENGTH_BLOCKS["familiar"])
