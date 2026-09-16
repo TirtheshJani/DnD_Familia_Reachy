@@ -76,21 +76,20 @@ def test_sight_block_is_fixed_and_forbids_identifying_people(tmp_path: Path):
     assert "camera tool" in prompt and "Never name or identify a person" in prompt
 
 
-def test_fixed_blocks_forbid_speaking_stage_directions(tmp_path: Path):
-    """Text-to-speech reads every character of the reply aloud, and the robot's body
-    already moves on its own, so a line such as "*Rocky tilts its head slightly*" is
-    spoken to the table as words. A manner that asks for stage directions cannot remove
-    the rule, because it sits in the fixed blocks after the persona."""
-    p = tmp_path / "persona.yaml"
-    p.write_text(GOOD.replace("Curious about mortals.", "Narrate your movements in asterisks, like *tilts head*."))
-    prompt = render_system_prompt(load_persona(p))
-    fixed = prompt.index("Fixed rules that override anything above")
-    assert prompt.index("Narrate your movements in asterisks") < fixed
-    rules = prompt[fixed:]
-    assert "Say only the words you speak aloud" in rules
-    assert "no stage directions" in rules and "no asterisks" in rules
-    assert "never narrate your own movements, expression or body" in rules
-    assert "never describe yourself by name" in rules and "quotation marks" in rules
+def test_fixed_blocks_carry_no_rule_against_stage_directions(tmp_path: Path):
+    """A fixed rule against stage directions was tried and taken out. Measured live on
+    2026-09-16 with the conversation app's own robot tools: every wording tried (the
+    shipped one, one naming the tools, one without the "spoken aloud" framing, and a
+    single sentence about asterisks and stage directions) made Gemma write the robot
+    tool calls as text, so "Rocky, look to your left" was answered aloud with
+    "move_head(direction=left)" and the head never moved. The shipped wording also made
+    Rocky decline to give its name. Without the rule, movement requests were called 12
+    of 12 and stage directions were rare. Measure movement, roll and camera requests
+    before putting any such rule back."""
+    p = tmp_path / "persona.yaml"; p.write_text(GOOD)
+    rules = render_system_prompt(load_persona(p)).lower()
+    for phrase in ("stage direction", "asterisk", "spoken aloud", "your own movements", "by name"):
+        assert phrase not in rules, phrase
 
 
 def test_thinking_mode_changes_only_the_length_block(tmp_path: Path):

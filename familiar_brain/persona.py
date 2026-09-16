@@ -100,21 +100,12 @@ def render_system_prompt(p: Persona, context: str = "", mode: str = "familiar") 
         "person; say 'the one on my left' or 'the person holding the cards'. If the picture is "
         "unclear, say so rather than guess.\n"
     )
-    # Text-to-speech reads every character of the reply aloud, and the robot's body already
-    # moves on its own (motion.py), so a stage direction is spoken to the table as words.
-    # Measured live on eight addressed lines with retrieved notes and tools, 48 replies each:
-    # without this block 7 narrated Rocky's own head, gaze or manner ("*Rocky tilts his
-    # head slightly*", "A slight tilt of my head"), one in asterisks, and 1 came in quotation
-    # marks. A shorter block without the head, eyes and name clauses still let 4 through.
-    # This one let none through.
-    speech_block = (
-        "Everything you write is spoken aloud word for word, and your body already moves by itself. "
-        "Say only the words you speak aloud, in the first person: no stage directions, no asterisks, "
-        "no actions in brackets, never narrate your own movements, expression or body (not your head, "
-        "your eyes, or where you look), and never describe yourself by name. Never put quotation marks "
-        "around your reply.\n"
-    )
+    # No rule against stage directions, though text-to-speech reads them aloud. Every
+    # wording measured live on 2026-09-16 made Gemma write the robot's movement calls as
+    # text ("move_head(direction=left)") instead of calling them: 1 of 12 movement requests
+    # called with the rule that shipped, 12 of 12 without, and a one-sentence rule about
+    # asterisks alone still leaked call syntax. Stage directions are the smaller harm; see
+    # tests/test_persona.py before putting a rule back.
     length_block = LENGTH_BLOCKS.get(mode, LENGTH_BLOCKS["familiar"])
-    prompt = "\n\n".join([persona_block, off_limits_block + dm_block + tool_block + sight_block + speech_block,
-                          length_block])
+    prompt = "\n\n".join([persona_block, off_limits_block + dm_block + tool_block + sight_block, length_block])
     return f"{context}\n\n{prompt}" if context else prompt
