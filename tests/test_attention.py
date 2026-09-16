@@ -47,3 +47,14 @@ def test_muted_never_tracks_and_never_glances():
     assert _calls(att.items(Decision.IGNORE, 1.0)) == [("head_tracking", {"enabled": False})]
     assert att.items(Decision.IGNORE, 30.0) == []
     assert att.items(Decision.IGNORE, 60.0) == []
+
+
+def test_linger_keeps_tracking_on_but_never_switches_it_on():
+    """Mute while tracking, one muted turn switches it off, unmute: a line not spoken to
+    Rocky inside the old linger must not switch tracking back on."""
+    st, att = make()
+    st.mark_named(0.0); att.items(Decision.ADDRESSED, 0.0)
+    st.muted = True
+    assert _calls(att.items(Decision.IGNORE, 2.0)) == [("head_tracking", {"enabled": False})]
+    st.muted = False
+    assert att.items(Decision.IGNORE, 9.0) == []
