@@ -7,19 +7,26 @@ from familiar_brain.retrieval import Store
 from tests.fakes.embedder import FakeEmbedder
 
 
+def _from_an_earlier_sitting(*notes: Path) -> None:
+    """Backdate notes a minute, as notes written before the session would be.
+
+    On Windows both the NTFS mtime and SQLite's created_at come from the tick-based
+    system clock, but SQLite cuts its reading to whole milliseconds. A note written in
+    the same tick as the first pass (15.625 ms by default) therefore looks up to 1 ms
+    newer than its own chunks, and the second pass re-indexes it once. Any test that
+    writes notes and then expects them skipped fails intermittently without this. The
+    error only runs that way: an edit saved in a later tick carries the later mtime.
+    """
+    earlier = time.time() - 60
+    for note in notes:
+        os.utime(note, (earlier, earlier))
+
+
 def test_index_notes_skips_unchanged_and_reindexes_changed(tmp_path: Path):
     notes = tmp_path / "notes"; notes.mkdir()
     (notes / "pc.md").write_text("# PC\nDocks of Nephria.\n")
     (notes / "npcs.md").write_text("# Barkeep\nOwes gold.\n")
-    # Backdated, as a note from an earlier sitting would be. On Windows SQLite stamps
-    # created_at from GetSystemTimeAsFileTime cut to whole milliseconds, which can lag
-    # NTFS's precise mtime by a full timer tick (15.625 ms by default). A note written
-    # that close to the first pass looks newer than its own chunks, so the second pass
-    # re-indexed it once and this test failed intermittently. The error only runs that
-    # way: an edit saved after indexing always carries the later mtime.
-    earlier = time.time() - 60
-    for name in ("pc.md", "npcs.md"):
-        os.utime(notes / name, (earlier, earlier))
+    _from_an_earlier_sitting(notes / "pc.md", notes / "npcs.md")
     store = Store(tmp_path / "k.db", embedder=FakeEmbedder())
     assert index_notes(store, notes) == {"indexed": 2, "skipped": 0}
     assert index_notes(store, notes) == {"indexed": 0, "skipped": 2}
@@ -49,6 +56,7 @@ def test_homebrew_files_are_skipped_on_a_second_pass_too(tmp_path: Path):
     notes = tmp_path / "notes"; (notes / "homebrew").mkdir(parents=True)
     (notes / "homebrew" / "house-rules.md").write_text("# Injuries\nCrit may become an injury.\n")
     (notes / "pc.md").write_text("# PC\nDocks of Nephria.\n")
+    _from_an_earlier_sitting(notes / "homebrew" / "house-rules.md", notes / "pc.md")
     store = Store(tmp_path / "k.db", embedder=FakeEmbedder())
     assert index_notes(store, notes) == {"indexed": 2, "skipped": 0}
     assert index_notes(store, notes) == {"indexed": 0, "skipped": 2}

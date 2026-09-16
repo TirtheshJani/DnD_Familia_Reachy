@@ -35,6 +35,11 @@ def index_notes(store: Store, notes_dir: Path) -> dict[str, int]:
     for f in files:
         src = f.relative_to(notes_dir).as_posix()
         corpus = "homebrew" if src.startswith("homebrew/") else "notes"
+        # Known gap, left for after the session: created_at is stamped when the chunks
+        # land, after the read and the embed, so a save made while its own file is being
+        # embedded is skipped until the note is saved again. It needs a save within tens
+        # of milliseconds of a reindex reading that file. A fix can stay in this module:
+        # stat before the read, and re-index if the mtime has moved after add_chunks.
         if src in known and f.stat().st_mtime <= known[src]:
             skipped += 1
             continue
