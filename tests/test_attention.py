@@ -40,6 +40,20 @@ def test_no_doa_means_no_glance():
     assert att.items(Decision.IGNORE, 0.0) == []
 
 
+def test_a_latched_direction_without_fresh_speech_earns_no_glance():
+    """The daemon keeps reporting the last speech direction once the speaker stops
+    (measured live 2026-09-16: 1.95 rad through 30 s of silence, speech_detected false).
+    The brain reads it after the line has ended, so only the speech flag or an angle that
+    moved since the last reading means somebody new has spoken."""
+    readings = iter([(1.95, False), (1.95, False), (0.2, False), (0.25, False), (2.9, True)])
+    _, att = make(doa=lambda: next(readings), glance_gap=0.0)
+    assert att.items(Decision.IGNORE, 0.0) == []                           # nothing to compare yet
+    assert att.items(Decision.IGNORE, 1.0) == []                           # same latched angle
+    assert _calls(att.items(Decision.IGNORE, 2.0)) == [("move_head", {"direction": "left"})]
+    assert att.items(Decision.IGNORE, 3.0) == []                           # moved under the threshold
+    assert _calls(att.items(Decision.IGNORE, 4.0)) == [("move_head", {"direction": "right"})]
+
+
 def test_muted_never_tracks_and_never_glances():
     st, att = make(doa=lambda: (math.pi, True))
     st.mark_named(0.0); att.items(Decision.ADDRESSED, 0.0)

@@ -4,9 +4,10 @@ Head tracking is the conversation app's daemon-side face tracker. It is on while
 Rocky is being spoken to and for a linger after the unextended follow-up window
 (last_named_at + window + linger; the gate's one-off extension is not mirrored), and
 off otherwise, because move_head is invisible while the tracker owns the head at
-weight 1. Changes go out on the next turn, never on a timer. While it is off, an IGNORE or AMBIENT line earns a glance toward the sound
-direction the daemon last measured, rate limited so Rocky watches the table rather
-than twitching at every line.
+weight 1. Changes go out on the next turn, never on a timer. While it is off, an
+IGNORE or AMBIENT line may earn a glance toward the sound direction, but only on
+evidence of fresh speech and rate limited, so Rocky watches the table rather than
+twitching at every line.
 
 Toggles go out only on a change: the app's MovementManager keeps its own flag and a
 repeated head_tracking(true) would reset its speaking handoff.
@@ -25,6 +26,13 @@ log = logging.getLogger("familiar.attention")
 
 DoaReader = Callable[[], tuple[float, bool] | None]
 
+# The daemon latches the direction of the last speech it heard and keeps reporting it
+# with speech_detected false once the speaker stops (measured live 2026-09-16: 1.95 rad
+# through 30 s of silence). The brain reads it after the line has ended, so a glance
+# needs the flag still set or an angle that moved since the previous reading. Without
+# this, Rocky snapped 40 degrees toward a stale direction and held it there.
+FRESH_ANGLE_RAD = 0.3
+
 
 class Attention:
     def __init__(self, *, state: BrainState, doa: DoaReader, follow_up_window_s: float,
@@ -34,6 +42,7 @@ class Attention:
         self.window = follow_up_window_s
         self.linger = linger_s
         self.glance_gap = glance_gap_s
+        self._last_angle: float | None = None
 
     def wants_tracking(self, decision: Decision, now: float) -> bool:
         if self.state.muted:
@@ -61,7 +70,11 @@ class Attention:
         reading = self.doa()
         if reading is None:
             return out
-        angle, _speech = reading
+        angle, speech = reading
+        previous, self._last_angle = self._last_angle, angle
+        if not (speech or (previous is not None and abs(angle - previous) > FRESH_ANGLE_RAD)):
+            log.info("no glance: doa %.2f rad is the latched direction, not fresh speech", angle)
+            return out
         direction = direction_from_angle(angle)
         self.state.last_glance_at = now
         log.info("glance %s (doa %.2f rad)", direction, angle)

@@ -6,7 +6,7 @@ port = 8090
 base_url = "http://127.0.0.1:8080/v1"
 generate_slot = 0
 classify_slot = 1
-classify_timeout_s = 0.6
+classify_timeout_s = 1.5
 
 [gate]
 follow_up_window_s = 8
@@ -32,6 +32,6 @@ doa_timeout_s = 0.15
 [motion]
 min_gesture_gap_s = 6
 reaction_gap_s = 15
-glance_gap_s = 12
+glance_gap_s = 30
 tracking_linger_s = 4
 mode_timeout_s = 300
