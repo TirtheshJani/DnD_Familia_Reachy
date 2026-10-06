@@ -10,9 +10,9 @@ def fake():
 
 
 def test_classify_parses_token_and_pins_slot(fake):
-    fake.chat_replies.append("ADDRESSED")
+    fake.chat_replies.append("AMBIENT")
     c = LLMClient(base_url=fake.base_url, classify_slot=1, classify_timeout_s=1.0)
-    assert c.classify(["Understudy is cute", "what do you think"], persona_name="Understudy") == Decision.ADDRESSED
+    assert c.classify(["Understudy is cute", "what do you think"], persona_name="Understudy") == Decision.AMBIENT
     body = fake.requests[-1]["body"]
     assert body["id_slot"] == 1 and body["max_tokens"] <= 4 and body["stream"] is False
 
@@ -42,6 +42,21 @@ def test_classify_disables_reasoning(fake):
     c = LLMClient(base_url=fake.base_url, classify_slot=1, classify_timeout_s=1.0)
     c.classify(["Natural twenty!"], persona_name="Understudy")
     assert fake.requests[-1]["body"]["reasoning_effort"] == "none"
+
+
+def test_classify_only_tells_ambient_from_ignore(fake):
+    """Rocky replies only when spoken to, which the gate decides by its name, the window
+    after a naming, or Speak Now. The classifier is left only the reaction question, so
+    the instruction no longer offers ADDRESSED and an ADDRESSED answer does not parse."""
+    from familiar_brain.llm import CLASSIFY_INSTRUCTION
+    assert "ADDRESSED" not in CLASSIFY_INSTRUCTION
+    assert "AMBIENT" in CLASSIFY_INSTRUCTION and "IGNORE" in CLASSIFY_INSTRUCTION
+    fake.chat_replies.append("IGNORE")
+    fake.chat_replies.append("ADDRESSED")
+    c = LLMClient(base_url=fake.base_url, classify_slot=1, classify_timeout_s=1.0)
+    assert c.classify(["what's behind the door?"], persona_name="Rocky") == Decision.IGNORE
+    with pytest.raises(ValueError):
+        c.classify(["Rocky, what's behind the door?"], persona_name="Rocky")
 
 
 def test_classify_unparseable_raises(fake):
@@ -103,3 +118,23 @@ def test_mood_reads_the_first_word_and_never_turns_a_negation_into_a_gesture(fak
                         ("not sad", None), ("no reaction", None), ("Sadly, none", None), ("", None)]:
         fake.chat_replies.append(reply)
         assert c.mood("x", moods=moods, prompt=REACTION_INSTRUCTION) == want, reply
+
+
+def test_reaction_prompt_tells_a_victory_from_a_joke():
+    """cheer (success) is a victory for the party; amused (happy) keeps only the funny."""
+    from familiar_brain.llm import REACTION_INSTRUCTION
+    assert "cheer: a victory or a triumph for the party" in REACTION_INSTRUCTION
+    assert "amused: the line is funny.\n" in REACTION_INSTRUCTION
+
+
+def test_complete_refuses_a_reply_cut_off_at_max_tokens(fake):
+    """A summary or campaign merge stopped at max_tokens loses its trailing headings (Open
+    threads, Memorable lines, Loot), yet read as a whole reply it was written and indexed as
+    complete, and catch-up never retried it because the .summary.md existed."""
+    c = LLMClient(base_url=fake.base_url, classify_slot=1, classify_timeout_s=1.0)
+    fake.chat_replies.append("## Scenes\n- The crypt\n## Open thr")
+    fake.chat_finish.append("length")
+    with pytest.raises(ValueError, match="max_tokens"):
+        c.complete([{"role": "user", "content": "summarise"}], max_tokens=1200)
+    fake.chat_replies.append("## Scenes\n- The crypt\n")
+    assert c.complete([{"role": "user", "content": "summarise"}]) == "## Scenes\n- The crypt\n"

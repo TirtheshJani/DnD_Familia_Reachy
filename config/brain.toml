@@ -25,13 +25,9 @@ chunks_per_corpus = 3
 max_context_chars = 4800
 retention_days = 7
 
-[robot]
-daemon_url = "http://10.0.0.100:8000"
-doa_timeout_s = 0.15
-
 [motion]
 min_gesture_gap_s = 6
-reaction_gap_s = 15
-glance_gap_s = 30
-tracking_linger_s = 4
+# Was 15 while every reaction cost a call on the classify slot. Most now come from the
+# keyword rules in motion.py, which cost nothing, so the table gets a look more often.
+reaction_gap_s = 10
 mode_timeout_s = 300

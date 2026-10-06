@@ -5,14 +5,19 @@ from pathlib import Path
 
 import pymupdf
 
+from familiar_brain.knowledge import CHUNK_CHARS
 from familiar_brain.retrieval import Chunk
 
 SOFT_CAP = 1200
 
 
 def split_soft(text: str, cap: int = SOFT_CAP) -> list[str]:
-    """Split on sentence ends so pieces stay under cap (plus one sentence of slack)."""
-    sents = re.split(r"(?<=[.!?])\s+", text.strip())
+    """Split on sentence ends so pieces stay under cap (plus one sentence of slack).
+
+    Not after a list number ("8. Self: ..."), which would leave the number on one piece
+    and its item on the next.
+    """
+    sents = re.split(r"(?<=[.!?])(?<!\d\.)\s+", text.strip())
     parts, cur = [], ""
     for s in sents:
         if cur and len(cur) + len(s) + 1 > cap:
@@ -30,7 +35,10 @@ def markdown_chunks(md: str, *, source: str, corpus: str) -> list[Chunk]:
     def flush():
         body = "\n".join(buf).strip()
         if body:
-            for piece in split_soft(body):
+            # Notes split at the cap the prompt cuts each chunk to (knowledge.CHUNK_CHARS),
+            # not SOFT_CAP: at 1200, file 10's Twelve Declarations was one chunk cut inside
+            # declaration 8, so 9 to 12 never reached Rocky however well they ranked.
+            for piece in split_soft(body, CHUNK_CHARS):
                 out.append(Chunk(corpus=corpus, source=source, title=title, text=piece))
     for line in md.splitlines():
         m = re.match(r"^#{1,6}\s+(.*)", line)

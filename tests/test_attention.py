@@ -1,74 +1,47 @@
 import json
-import math
 
 from familiar_brain.attention import Attention
-from familiar_brain.gate import Decision
 from familiar_brain.state import BrainState
 
+ON, OFF = ("head_tracking", {"enabled": True}), ("head_tracking", {"enabled": False})
 
-def make(doa=lambda: None, window=8.0, linger=4.0, glance_gap=12.0):
+
+def make():
     st = BrainState()
-    return st, Attention(state=st, doa=doa, follow_up_window_s=window, linger_s=linger, glance_gap_s=glance_gap)
+    return st, Attention(state=st)
 
 
 def _calls(items):
     return [(i["name"], json.loads(i["arguments"])) for i in items]
 
 
-def test_tracking_turns_on_when_addressed_and_off_after_the_window_plus_linger():
+def test_the_first_turn_switches_tracking_on_whoever_it_was_said_to():
+    """state.tracking starts False, so the first line the brain hears, an IGNORE line
+    included, turns the tracker on."""
     st, att = make()
-    st.mark_named(100.0)
-    assert _calls(att.items(Decision.ADDRESSED, 100.0)) == [("head_tracking", {"enabled": True})]
-    assert att.items(Decision.ADDRESSED, 103.0) == []                      # no change, no repeat
-    assert att.items(Decision.IGNORE, 110.0) == []                         # 8 + 4 = 12 s of linger
-    assert _calls(att.items(Decision.IGNORE, 112.5)) == [("head_tracking", {"enabled": False})]
-    assert st.tracking is False
+    assert _calls(att.items()) == [ON]
+    assert st.tracking is True
 
 
-def test_glances_only_while_tracking_is_off_and_rate_limited():
-    st, att = make(doa=lambda: (0.1, True))
-    assert _calls(att.items(Decision.IGNORE, 0.0)) == [("move_head", {"direction": "left"})]
-    assert att.items(Decision.AMBIENT, 5.0) == []                          # inside glance gap
-    assert _calls(att.items(Decision.AMBIENT, 13.0)) == [("move_head", {"direction": "left"})]
-    st.mark_named(20.0)
-    assert _calls(att.items(Decision.ADDRESSED, 20.0)) == [("head_tracking", {"enabled": True})]
-    assert att.items(Decision.IGNORE, 21.0) == []                          # tracking owns the head
+def test_tracking_stays_on_with_no_repeated_toggle():
+    """A repeated head_tracking(true) resets the app's speaking handoff."""
+    _, att = make()
+    att.items()
+    assert [att.items() for _ in range(5)] == [[]] * 5
 
 
-def test_no_doa_means_no_glance():
-    _, att = make(doa=lambda: None)
-    assert att.items(Decision.IGNORE, 0.0) == []
-
-
-def test_a_latched_direction_without_fresh_speech_earns_no_glance():
-    """The daemon keeps reporting the last speech direction once the speaker stops
-    (measured live 2026-09-16: 1.95 rad through 30 s of silence, speech_detected false).
-    The brain reads it after the line has ended, so only the speech flag or an angle that
-    moved since the last reading means somebody new has spoken."""
-    readings = iter([(1.95, False), (1.95, False), (0.2, False), (0.25, False), (2.9, True)])
-    _, att = make(doa=lambda: next(readings), glance_gap=0.0)
-    assert att.items(Decision.IGNORE, 0.0) == []                           # nothing to compare yet
-    assert att.items(Decision.IGNORE, 1.0) == []                           # same latched angle
-    assert _calls(att.items(Decision.IGNORE, 2.0)) == [("move_head", {"direction": "left"})]
-    assert att.items(Decision.IGNORE, 3.0) == []                           # moved under the threshold
-    assert _calls(att.items(Decision.IGNORE, 4.0)) == [("move_head", {"direction": "right"})]
-
-
-def test_muted_never_tracks_and_never_glances():
-    st, att = make(doa=lambda: (math.pi, True))
-    st.mark_named(0.0); att.items(Decision.ADDRESSED, 0.0)
-    st.muted = True
-    assert _calls(att.items(Decision.IGNORE, 1.0)) == [("head_tracking", {"enabled": False})]
-    assert att.items(Decision.IGNORE, 30.0) == []
-    assert att.items(Decision.IGNORE, 60.0) == []
-
-
-def test_linger_keeps_tracking_on_but_never_switches_it_on():
-    """Mute while tracking, one muted turn switches it off, unmute: a line not spoken to
-    Rocky inside the old linger must not switch tracking back on."""
+def test_a_mute_switches_tracking_off_once_and_an_unmute_back_on():
     st, att = make()
-    st.mark_named(0.0); att.items(Decision.ADDRESSED, 0.0)
+    att.items()
     st.muted = True
-    assert _calls(att.items(Decision.IGNORE, 2.0)) == [("head_tracking", {"enabled": False})]
+    assert _calls(att.items()) == [OFF]
+    assert att.items() == [] and st.tracking is False
     st.muted = False
-    assert att.items(Decision.IGNORE, 9.0) == []
+    assert _calls(att.items()) == [ON]
+    assert att.items() == []
+
+
+def test_muted_from_the_start_sends_nothing():
+    st, att = make()
+    st.muted = True
+    assert att.items() == [] and st.tracking is False

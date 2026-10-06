@@ -571,3 +571,414 @@ it exactly as designed, so nothing looked wrong. The graceful degradation is rig
 it means a silent retrieval failure is invisible from the test suite alone. The
 `retrieval_ms` mark in the brain log is what exposes it live, and
 `test_retrieval_is_timed_and_the_tools_are_offered` pins that the mark exists.
+
+## P12. File 10, the DM's canon, reaches the brain (2026-10-02)
+
+`plans/10-nesh-canon.md` arrived with a "Canon corrections" section in `00-README.md`
+and twelve new rows in `09-lexicon.md`. None of it was in `data/notes/`, and the seed
+recipe in `docs/notes-policy.md`, `cp plans/0*.md`, would never have copied file 10.
+The recipe now copies `plans/[0-9][0-9]-*.md`, which takes 00 to 10 and leaves out the
+dated plan documents. Running it in a scratch directory reproduces today's `data/notes/`
+exactly, line endings aside.
+
+Retrieval tags a chunk with its corpus and heading, never its file, so a chunk from
+`03-nephria-city.md` saying "North Reach Plaza" would reach the model with the same
+authority as file 10. The `data/notes/` copies of 03 (two lines) and 09 (one row) now say
+Northreach Crossing; `plans/` is untouched, and the recipe repeats the rename (with
+`perl -pi -e` since P16).
+No other superseded spelling was found: Thanatos appears only as a lexicon variant.
+
+`config/lexicon.tsv` gained the canon's likeliest mishearings: the old settlement name
+and its split forms, Thanatos, the Gatewarden, Maliburn and sennight split in two. Eris
+and Nesh get no rows, being under the six-letter fuzzy floor with everyday neighbours
+(iris, error, mesh, fresh). Neshians and sennights have bare canonical rows only so the
+fuzzy pass cannot strip their plural. Covered by
+`test_shipped_lexicon_corrects_heard_forms_of_the_nesh_canon`,
+`test_shipped_lexicon_leaves_ordinary_words_near_the_nesh_canon_alone` and
+`test_shipped_lexicon_keeps_the_plurals_of_the_nesh_canon`.
+
+Reindexed with the real `BgeEmbedder` (4 files indexed, 7 unchanged). File 10 is the top
+notes hit for "What is the Song?", "Who is Thatos?", "What are the Twelve Declarations?"
+and "where is Northreach Crossing". The old name now reaches the prompt only inside
+sentences that correct it. That check covered four questions only, and counted ranks, not
+what reached the model; P16 found file 10 cut short at the prompt and still missing for
+"what is a sennight", where it is not in the top three.
+
+## P13. Rocky replies only when spoken to (2026-10-02)
+
+Live on 2026-09-16 (`data/sessions/20260916-182232-0189cc.jsonl`), the one time in about
+seventy lines that Rocky spoke uninvited was an 868 word segment: the transcriber had
+merged minutes of table chatter, and in the middle of it players explained the familiar
+to each other ("we're doing uh rocky", "What's his name, sorry? Rocky."). `_named()`
+found the name anywhere in the segment, so the gate said ADDRESSED and Rocky generated
+for a minute. Three changes, all in `familiar_brain/gate.py` and `llm.py`:
+
+- **A naming must be spoken to Rocky, not about it.** In a run-on segment (over 60
+  words, since P16) it counts only when at most 25 words follow it, since the line just
+  said to the familiar is the last thing the transcriber glued on; words rather than sentences because transcripts often
+  come back unpunctuated. The live segment had 64 words after its last "rocky". A small
+  set of mention shapes, in the style of the adjective rules, also stop counting: the
+  name introduced as a name ("his name is", "called", "named", "I call him"), "we're
+  doing rocky", "talking about Rocky", the name alone answering "What's his name?", and
+  a possessive ("Rocky's eyes are glowing"), except "Rocky's turn" and "Rocky's go".
+  This does not stop every line about Rocky: a short third person statement ("Rocky is
+  so cute", "I think Rocky is broken", "look at Rocky") still reads as a naming, since
+  nothing in its words tells it from one said to Rocky. That is the limit of gating on
+  the name, and `test_a_short_statement_about_rocky_still_reads_as_a_naming` pins it.
+- **The classifier can no longer make Rocky speak.** `CLASSIFY_INSTRUCTION` offered
+  ADDRESSED for "a direct question or command that only Rocky could be expected to
+  answer", which supersedes part of E8. It now chooses only AMBIENT or IGNORE, keeping
+  its lean to IGNORE, and `LLMClient.classify` no longer parses ADDRESSED. If any
+  classifier still answers ADDRESSED, the gate logs it and returns IGNORE. Speech now
+  needs a naming, the follow-up window after one, or Speak Now.
+- **A run-on inside the follow-up window is chatter, not a follow-up.** Over 60 words
+  (twenty seconds and more of unbroken speech; real follow-ups have run to about ten)
+  goes to the classifier instead, and does not use up one of `max_follow_ups`.
+
+The live row is kept verbatim in `tests/fixtures/live_uninvited_rocky.jsonl`, since
+`data/` is not tracked. Covered by `tests/test_gate_spoken_to.py` and
+`test_classify_only_tells_ambient_from_ignore`. The new instruction has not been scored
+against the live model; its only job now is AMBIENT against IGNORE, and a miss either way
+can cost a reaction but never a reply.
+
+## P14. Head tracking is always on while Rocky is awake; Plan 3 D4 reversed (2026-10-02)
+
+Plan 3 D4 had the face tracker on only while Rocky was addressed and for
+`tracking_linger_s` after the follow-up window, and off otherwise so that a `move_head`
+toward the daemon's sound direction could show on the other lines. TJ asked for the
+face tracking to be always on. It now is, on every turn that carries a preface (IGNORE,
+AMBIENT, ADDRESSED, the greeting and sight continuations), from the first line after
+the brain starts, whoever that line was said to. Muted is asleep: tracking goes off on
+the next turn, ahead of the sleepy cue, and comes back on at the turn after an unmute,
+ahead of the welcoming cue. Toggles still go out only on a change, since a repeated
+`head_tracking(true)` resets the app's speaking handoff.
+
+`move_head` is invisible while the tracker owns the head at weight 1, so the glances
+could never be seen again and went rather than stay as dead code: the glance path in
+`attention.py`, `glance_item`, `robot.py` and its DoA reader (nothing else read the
+daemon), the glance stamp in `BrainState` and in the revision rewind's `_PrefaceStart`,
+and the `[robot]` section and `glance_gap_s` and `tracking_linger_s` keys in
+`config/brain.toml`. The config loader still has to accept a local `brain.toml` that
+has them, and unknown keys raise there, so it skips the `[robot]` section and drops the
+two retired motion keys by name; any other unknown key still fails.
+
+Covered by `tests/test_attention.py`,
+`test_the_first_line_switches_tracking_on_even_when_nobody_spoke_to_rocky`,
+`test_tracking_stays_on_across_every_kind_of_turn_with_no_repeated_toggle`,
+`test_unmute_switches_tracking_back_on_ahead_of_the_wake_cue`,
+`test_greeting_prompt_switches_tracking_on_ahead_of_the_wake_gesture_and_opens_no_window`,
+`test_a_revised_first_line_nobody_spoke_to_rocky_still_switches_tracking_on` and
+`test_a_brain_toml_with_the_retired_glance_keys_still_loads`. Smoke-test P2 now checks
+that tracking stays on and sleeps with the mute, instead of the hand-back and glance.
+
+## P15. More expression from the keyword rules, none over plain replies (2026-10-02)
+
+TJ asked for Rocky to be more expressive. Live on 2026-09-16 (`data/brain.log`) the
+reaction call answered none on 49 table lines, timed out at 1.5 s on 4 and chose a
+reaction once, so nearly all of Rocky's expression between replies has to come from the
+free keyword rules in `familiar_brain/motion.py`. Commit 164b7f7 stands: a plain reply
+still plays no emotion.
+
+- **More table rules.** Shock ("oh no", "oh my god", "what the hell", "are you
+  kidding", "holy crap", and "no way" only as an exclamation of its own, so "no way to
+  get across" is not a shock) plays surprised. A victory ("Let's go!" or "let's gooo"
+  but not "let's go to the tavern" or "Okay, let's go.", a shouted "Yes!", "we did it"
+  and "we won" where they end the sentence, "nailed it", "huzzah", "victory", "woohoo")
+  plays the new `cheer` mood, success. (P16 narrows several of these.) "Killed it" is left out: at this table it is as
+  likely the wolf that killed the horse. "Roll initiative" leans in with attentive;
+  no reply follows a table line, so it plays over no speech. "Rest in peace", "that's so
+  sad" and "she didn't make it" join sad, and a transcriber's "[laughter]" joins
+  amused. The specific rules keep first place, so "oh no, he went down" stays scared.
+- **`cheer` is a reaction mood.** It is in `REACTION_MOODS` and `REACTION_INSTRUCTION`,
+  split out of amused ("funny, or a triumph for the party") so a victory narrated at
+  length, which names no keyword, gets success rather than happy. Not yet scored
+  against the live model. Both persona files map it to `play_emotion:success`.
+- **An AMBIENT line always reacts.** The gate answers AMBIENT only for a burst of
+  excitement or dismay, which is short by nature, so `for_table(..., ambient=True)`
+  asks the reaction call whatever the word count, and when the call fails it plays
+  surprised (P16: an explicit none no longer does) (`AMBIENT_FALLBACK_MOOD`): engaged for a cheer and a groan
+  alike, where amused would grin at a friend going down. A table rule mood that a
+  persona has no gesture for is now left to the call, as on an addressed turn.
+- **A greeting or a goodbye waves.** An addressed line that is only "hello", "good
+  evening", "welcome back", "goodnight", "bye" or "see you next session", with a word
+  of address and for a greeting a "how are you", plays welcoming. "Hey" is not a
+  greeting: it comes before nearly every request, and a wave on each would bring back
+  the constant emoting. A goodbye waves rather than plays sleepy, which is the mute
+  cue's gesture and would read as Rocky going to sleep.
+- **`reaction_gap_s` 15 to 10**, in `config/brain.toml` and the `Motion` default, since
+  most reactions now cost no call. `min_gesture_gap_s` stays 6.
+- **The manner is a touch warmer in words**: "a quick spark of delight or dismay when
+  the dice turn" and permission to open with a short exclamation such as "Oh!" or "Ha!". No
+  stage directions, which made Gemma speak robot tool calls (commit 9e8fe86).
+
+Tests that used "Rocky, hello" as the plain reply now use "Rocky, and the docks?". New:
+`test_table_rules_catch_shock_at_the_table`,
+`test_table_shock_rules_leave_ordinary_table_talk_alone`,
+`test_table_rules_cheer_a_victory`, `test_table_victory_rules_leave_plans_and_answers_alone`,
+`test_table_rules_lean_in_when_combat_starts_and_mourn_a_little_more`,
+`test_table_rules_keep_their_order_when_a_line_says_two_things`,
+`test_addressed_rules_greet_and_see_off_but_only_a_line_that_is_all_greeting`,
+`test_a_greeting_plays_welcoming_and_a_plain_reply_still_plays_nothing`,
+`test_a_victory_at_the_table_plays_success`,
+`test_an_ambient_burst_asks_the_reaction_call_however_short`,
+`test_an_ambient_burst_falls_back_to_surprised_when_the_call_fails_or_says_none`,
+`test_an_ambient_burst_respects_both_gaps`,
+`test_an_ambient_burst_with_no_rule_and_no_reaction_still_looks_surprised`,
+`test_an_ambient_burst_plays_what_the_reaction_call_chose`,
+`test_a_victory_shouted_at_the_table_plays_success_without_a_reaction_call`,
+`test_a_greeting_to_rocky_waves_but_a_request_after_hey_does_not` and
+`test_reaction_prompt_tells_a_victory_from_a_joke`.
+
+## P16. Review fixes to P12 to P15 (2026-10-02)
+
+A review of the day's work found these, each reproduced before it was fixed.
+
+- **Recall questions to Rocky were read as mentions** (`gate.py`). "what was the
+  innkeeper's name? Rocky?" matched the name-question rule, and with the comma dropped
+  "what's this called Rocky" or "what were we talking about Rocky" matched the mention
+  words. The name-question rule now needs his, her, its or their name (or "call him?")
+  and a bare answer, the name then a stop or nothing. The mention words do not count in
+  a clause that opens with a question word when the name ends it or comes before its
+  "?". "we named him Rocky" and "What do you call him? Rocky." are now mentions too.
+- **The 25 word rule applies only to run-ons** (over 60 words, `_MAX_FOLLOW_UP_WORDS`).
+  A 34 word recap request that starts with "Rocky" was being dropped.
+- **A new app session gets tracking back** (`app.py`). The greeting opens one, whose
+  MovementManager starts with tracking off, but the brain still held it on and toggles go
+  out only on a change, so the head stayed still all night. The greeting now resets the
+  brain's flag first.
+- **An AMBIENT line answered none plays nothing** (`motion.py`). The fallback overrode an
+  explicit none, so narration the classifier calls AMBIENT ("You descend into the
+  cistern.") always got surprised. It now plays only when the call fails, gives no usable
+  answer, or picks a mood the persona has no gesture for.
+- **Table rules read the last 25 words of a segment**, and "oh no", "no way", "holy
+  crap", "are you kidding" and "what the hell" must end their sentence. Of the six live
+  "oh no" hits in `data/sessions`, the three in 70 to 92 word chatter go; the three where
+  "Oh no." ends its sentence ("Oh no. I'm sorry.") still play surprised. "Victory",
+  "hooray", "hurrah" and "huzzah" count only as a cry of their own, not in "Victory Road"
+  or "roar in victory". "Roll initiative" does not count inside a question and no longer
+  spends the reaction gap, so the first crit of the fight still reacts.
+- **Unpunctuated triumphs**: "YES YES YES", "Fuck yes", "we killed the dragon!" and "we
+  got him!" cheer, and "rolled a twenty" joins the crit rule. "No no no" is a shock. Not
+  "crits", since "he crits you" is the monster's.
+- **The lexicon keeps possessives** (`lexicon.py`). The fuzzy pass read "Gatewarden's"
+  as one token and rewrote it to "Gatewarden", and "Neshian's" to "Neshians". A trailing
+  possessive is now matched without its apostrophe and given back, and a plain plural of
+  a canonical word is left alone.
+- **Notes are chunked at 700 characters**, the cut `build_context` makes, not 1200
+  (`chunking.py`), and a list number stays with its item. File 10's Twelve Declarations
+  was one chunk cut inside declaration 8. Reindexed (11 files): "What does the Hospitality
+  declaration say?" now brings the Hospitality text into the prompt.
+- **File 04's "Styxian gods such as Eris"** is corrected in the `data/notes/` copy and
+  the seed recipe, which now uses `perl -pi -e` because BSD and macOS `sed -i` reads the
+  script as a backup suffix. After reindexing, "Who is Eris?" no longer puts the stale
+  sentence in the prompt. Still open: "what is a sennight" has no file 10 chunk in its top
+  three, and "who is the Gatewarden" ranks file 10 third.
+- **Docs**: smoke-test P3 reads a and b again five seconds apart, not ten, since
+  `reaction_gap_s` is now 10. The `CLASSIFY_INSTRUCTION` comment says its 10 of 12 score
+  was the three way wording's; the AMBIENT or IGNORE wording is unscored.
+
+New tests: `test_a_naming_buried_early_in_a_run_on_segment_does_not_count` (renamed, now
+over 60 words), `test_a_long_request_that_starts_with_the_name_still_counts`,
+`test_a_short_statement_about_rocky_still_reads_as_a_naming`, new cases in
+`test_talking_about_rocky_is_not_a_naming` and `test_speaking_to_rocky_is_still_a_naming`,
+`test_a_second_greeting_switches_tracking_on_again_for_the_new_app_session`,
+`test_an_ambient_line_the_reaction_call_answers_none_plays_nothing`,
+`test_an_ambient_line_the_reaction_call_answers_none_still_idles`,
+`test_an_ambient_reaction_with_no_gesture_falls_back_to_surprised`,
+`test_table_rules_read_only_the_end_of_a_long_segment`,
+`test_shock_needs_an_exclamation_not_a_question_or_a_greeting`,
+`test_victory_is_an_exclamation_not_a_name_or_narration`,
+`test_unpunctuated_triumphs_still_cheer`,
+`test_initiative_leans_in_without_costing_the_first_crit_its_reaction`,
+`test_shipped_lexicon_keeps_possessives_and_plurals_of_the_canon`,
+`test_a_misheard_possessive_is_corrected_and_keeps_its_suffix`,
+`test_every_item_of_a_long_canon_list_reaches_the_prompt` and
+`test_the_seed_recipe_corrects_eris_and_runs_on_macos_too`.
+`test_an_ambient_burst_falls_back_to_surprised_when_the_call_fails` lost its "none" case.
+
+## P17. Rocky learns during and between sessions without `/api/session/end` (2026-10-02)
+
+The summariser ran only on `POST /api/session/end`. The one real session,
+`data/sessions/20260916-182232-0189cc.jsonl`, was never ended, so nothing from it was
+learnt, and `apply_retention` would have deleted its raw log unlearnt once it was a week
+old. Mid-session, nothing said at the table was searchable at all.
+
+- **Live indexing, embedding only** (`familiar_brain/live_index.py`). A worker reads the
+  active session log every 5 s and indexes it into `sessions` once the oldest unindexed
+  row is 30 s old (`REVISION_WINDOW_S`, so most revisions have landed) or 8 rows have
+  piled up. It never calls the LLM: live on 2026-09-16 classify calls timed out at 1.5 s
+  and a reply took 60 s. Only the changed tail piece is embedded again
+  (`Store.delete_pieces`), so a batch costs a piece or two however long the session. It
+  reads the file, not the turns, so lines dropped by mute-and-stop-logging never reach it.
+  Chunks go under the raw log's own name, which the summariser, retention and purge
+  already delete. Deliberate notes are indexed on the next tick at weight 2.0.
+- **Revisions de-duplicated** (`familiar_brain/transcript.py`, shared with the
+  summariser). The live log holds each utterance 2 to 6 times; a later line that repeats
+  at least 60 percent of the previous line's words, in order, replaces it, keeping any
+  front the transcriber's window slid past. The 2026-09-16 log goes from 70 rows and
+  15607 characters to 38 and 10067. Deliberate notes are never folded.
+- **Catch-up learning** (`familiar_brain/learning.py`). Every raw log with no summary,
+  other than the active session, is queued at brain startup, `/api/session/start` and the
+  new `POST /api/learn`, and summarised in the background one at a time, never while a
+  session is active: one already running finishes, the rest wait for the next end, start
+  or restart. A failure leaves the raw log for the next catch-up. A session with nothing
+  logged gets a one-line summary and no model call. `familiar-brain learn` does it all
+  now, synchronously, with progress; with llama-server down it reports that session as
+  failed, keeps its raw log, and exits 1.
+- **`/api/session/start` with a session open ends and queues it** instead of starting
+  over it and orphaning it. The response gains `ended`.
+- **Retention only deletes a summarised raw log**, and never one the learner holds.
+  Catch-up is queued before retention runs at startup.
+- **Deliberate notes are copied into the summary** under "Deliberate notes", by code, so
+  they outlive the raw log; they are scrubbed like the rest. The summary prompt now gets
+  the de-duplicated transcript.
+- **A missing players file is a WARNING** at startup and before every summary, since
+  `config/players.txt` is absent on the development machine and nothing is scrubbed
+  without it. Nothing creates it. The file is now read afresh for each summary.
+- **Purging the session in progress is refused** (409): the live indexer and the log would
+  bring it back.
+- `Store` takes a lock around its SQL, now that the live worker, the learner and request
+  threads share one connection.
+
+Not run against the real stack. On the next brain start the 14 development logs of
+2026-09-11 (mock cistern sessions) are learnt too, before the 16 September one; purge
+any not wanted with `DELETE /api/session/<id>` first. The 16 September transcript is about
+4k tokens, well inside one slot, but a full four hour session will not fit one summary
+call; that is not addressed here.
+
+New tests: `tests/test_transcript.py`, `tests/test_live_index.py`, `tests/test_learning.py`
+and `tests/test_app_learning.py`.
+
+## P18. Long sessions are summarised in windows; a running campaign memory (2026-10-02)
+
+P17 left two gaps. A four hour session does not fit one summary call: llama-server runs
+`-np 2 -c 32768`, about 16k tokens a slot, and the 21 minutes logged on 2026-09-16 were
+10067 characters de-duplicated, so four hours is about 115k (about 29k tokens). And
+nothing joined the sessions up: "what should we do next, Rocky?" could only reach
+whichever session summary it happened to match.
+
+- **Map-reduce summaries** (`familiar_brain/summariser.py`). After de-duplication, lines
+  made only of filler words ("Yeah.", "Uh.", "Okay okay.") are dropped; deliberate notes
+  never are. A transcript of up to `WINDOW_CHARS` (24,000 characters, about 6k tokens at
+  4 characters a token) still takes one call with the unchanged `SUMMARY_PROMPT`. A longer
+  one is packed, whole lines in order, into windows of at most that size (a run-on line
+  with no full stop is cut at a space), each summarised with `PART_PROMPT`, and the
+  partials merged with `MERGE_PROMPT` into the same six headings, in stages if together
+  they would not fit one window. Each call is then under about 7.4k tokens with prompt
+  and reply, and under 9.5k even at 3 characters a token, well inside a slot. Deliberate
+  notes go verbatim to the last merge under "## Deliberate notes", and are still appended
+  by code as before. Every partial and the result are scrubbed of player names.
+- **All or nothing.** An exception or an empty reply from any call leaves no summary
+  file and no change to the store: the deletes of the session's old chunks now happen
+  after the calls, so the live indexer's chunks stay searchable, and the file is written
+  through a temporary name. The session stays unsummarised, so catch-up retries it.
+- **Campaign memory** (`familiar_brain/campaign.py`). After each summary the model
+  merges the previous memory and the new summary into `data/sessions/campaign-memory.md`
+  (not `data/notes`, which people curate), with the headings Story so far, NPCs, Places,
+  Open threads, Loot and resources, Decisions that matter. The prompt carries the same
+  fiction-only rules, a 6,000 character cap (enforced by cutting at a line, with a
+  WARNING, if the model ignores it), carries unresolved threads forward and drops
+  resolved ones, and says it records only play: the DM's notes are canon and win. The
+  notes themselves are not passed in. The version before each merge is kept as
+  `campaign-memory.prev.md`. It is indexed into `sessions` under its own source at
+  weight 2.0, one chunk per heading, and the Open threads and Story so far chunks carry a
+  short cue in their title ("what the party could do next", "a recap") so a question that
+  names neither still finds them. It is never added whole to a prompt.
+- **Keeping it honest.** Its first line records each summary it was built from with a
+  hash of the summary's text. If the summaries no longer match (one purged,
+  re-summarised, or an older session learnt late) it is rebuilt from every remaining
+  summary, oldest first, one merge at a time, rather than asking the model to forget one
+  session. A purge drops the memory, its `.prev` too if that holds the session, and their
+  chunks at once with no model call, since a purge can come mid-session; the learner
+  rebuilds it at the next idle moment (`DELETE /api/session/<id>` kicks it). A merge
+  failure does not fail the session's summary; the memory stays due and the next
+  catch-up or `familiar-brain learn` retries it. No merge runs while a session is active.
+- `GET /api/sessions` lists only session logs and summaries, not the campaign files.
+
+New tests: `tests/test_campaign.py`, the map-reduce tests in `tests/test_summariser.py`,
+and one in `tests/test_app_learning.py`. `test_nothing_is_summarised_while_a_session_is_active`
+now counts two calls, the summary and its campaign merge.
+
+## P19. Review fixes to P17 and P18: purges, pauses, and what reaches the prompt (2026-10-02)
+
+A review of P17 and P18 reproduced each finding below in a scratch directory before it was
+fixed. Each fix has a test.
+
+- **A purge during a summary is no longer undone** (`familiar_brain/summariser.py`). The
+  summary's model calls take minutes; a `DELETE /api/session/<id>` landing in them deleted
+  the log and its chunks, then the summary wrote its file, re-added its chunks and the raw
+  transcript's, and the campaign merge folded the session back in. The summary's write and
+  a purge now share a lock, and the write goes ahead only if the raw log is still there;
+  otherwise the result is dropped (`Purged`) and the learner logs it at INFO.
+- **A purge removes chunks whose file is already gone.** It deleted the chunks only of
+  files that still existed, so chunks left under a missing log's name survived every purge.
+  It now deletes both sources' chunks unconditionally, and reports a purge if it removed
+  either files or chunks.
+- **No model call goes out once a session starts.** The rule was checked only between
+  sessions and before each campaign merge. A long session's windows and merge all went out
+  after a session had started, which the startup catch-up made the normal case. Every
+  summary call now asks first and, if a session is active, stops with nothing written
+  (`Paused`); the learner puts that session back at the front of the queue.
+- **A session learnt during a catch-up listing is not learnt again** (`learning.py`).
+  `catch_up` lists the logs outside the lock, so one finished in between was queued again
+  and summarised twice. The worker now skips a queued log whose summary exists.
+- **The summary's store update is all or nothing.** The old chunks were deleted and the
+  file written before the new chunks were embedded, so an embedder failure left a summary
+  file (the session counted as learnt, never retried) and nothing in the store.
+  `Store.add_chunks` takes `replace=`: it embeds first, then deletes and inserts in one
+  transaction. The summary file is written last.
+- **Short lines are not folded into a question about them** (`transcript.py`). A later line
+  repeating 60 percent of an earlier one replaced it, so "The innkeeper is called Bram."
+  followed by "Who is the innkeeper called again?" lost the name. A line of under six
+  words is now replaced only by a line that begins with all of it, give or take one word
+  gained at the front. All but one short fold in the 2026-09-16 log are of that shape and
+  still fold; the exception is a lone "I", now kept as a line of its own (39 rows and 10068
+  characters de-duplicated, from 38 and 10067). Longer lines keep the 60 percent rule, so a long statement followed by a long
+  question that repeats most of it can still fold; on that log only 1 of 32 folds was more
+  than 30 s apart.
+- **The campaign memory's cap keeps every section** (`campaign.py`). It cut from the end,
+  and Story so far comes first, so an over-long reply lost NPCs, Places, Open threads, Loot
+  and Decisions for good. It now drops the oldest Story so far lines, keeping the latest;
+  a reply that still does not fit is refused and the memory stays due.
+- **Campaign chunks no longer fill every sessions slot.** At weight 2.0 they took all three
+  for almost any question, and a fact that only a session summary kept never reached the
+  prompt or `recall`. Measured with the BGE embedder: at 2.0, "what was the seal on the
+  letter?", "what did you say about the lotus?" and "what did the courier look like?" each
+  returned three campaign chunks; at 1.6 the summary's Loot, Memorable lines and NPCs met
+  chunks each made the top three, and "where were we?" and "what should we do next?" still
+  went to the memory. `CAMPAIGN_WEIGHT` is now 1.6, above a summary's 1.5 and below a
+  deliberate note's 2.0. Sections that are only "- none" are no longer indexed.
+- **A reply cut off at `max_tokens` is a failure** (`llm.py`). `LLMClient.complete` accepted
+  it as whole, so a summary or memory without its last headings was written and never
+  retried. It now raises when `finish_reason` is `length`. Because that failure would
+  repeat on every retry, merges get `MERGE_MAX_TOKENS` 2000 (a merge is then under about
+  10.2k tokens at 3 characters a token) and the campaign merge 2500 (a memory at the 6,000
+  character cap is about 2000 tokens).
+- **The prompt says the notes outrank the memory of play** (`knowledge.py`). The merge
+  prompt said the notes win, but the notes are never passed to the merge, so that clause is
+  gone. When any sessions line reaches the "What you know" block, a closing line now says
+  that `[notes]` are the DM's canon and `[sessions]` only the familiar's memory of play.
+- **Sessions is not squeezed out of the prompt.** `build_context` read the corpora in turn
+  and stopped at the first line over budget, so sessions, read last, was cut first once
+  long rules were indexed. Each corpus's best hit now goes in before any corpus's second,
+  a line that does not fit is skipped rather than ending the block, and the lines are
+  still written in corpus order.
+
+Not run against the real stack; the retrieval weights were measured with the real BGE
+embedder on a scratch store. The purge route still allows a purge of the session the
+learner holds; the lock makes that safe.
+
+New tests: `test_a_purge_landing_mid_summary_leaves_nothing_behind`,
+`test_no_call_goes_out_once_a_session_starts_mid_summary` and
+`test_a_session_learnt_while_catch_up_listed_it_is_not_learnt_again` in
+`tests/test_learning.py`; `test_a_purge_forgets_chunks_whose_file_is_already_gone` and
+`test_an_embedder_failure_leaves_the_live_chunks_and_no_summary` in
+`tests/test_summariser.py`; `test_a_short_line_echoed_by_a_later_one_is_kept` in
+`tests/test_transcript.py`; `test_an_over_cap_memory_keeps_every_heading_and_open_thread`
+and `test_a_session_summary_fact_is_still_retrievable_once_a_campaign_memory_exists` in
+`tests/test_campaign.py`; `test_complete_refuses_a_reply_cut_off_at_max_tokens` in
+`tests/test_llm.py`; `test_the_context_says_the_notes_outrank_the_memory_of_play` and
+`test_long_rules_do_not_squeeze_out_the_sessions_corpus` in `tests/test_knowledge.py`.
+`test_it_is_indexed_in_sessions_under_its_own_source_at_the_top_weight` is renamed
+`..._just_above_a_summary` and checks 1.6. `tests/fakes/llm_server.py` can now script
+`finish_reason`.

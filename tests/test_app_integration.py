@@ -99,8 +99,9 @@ def test_mock_session_speaks_only_when_addressed(env):
             assert "idle_do_nothing" not in names and "response.output_text.delta" in _types(resp)
         else:
             assert "response.output_text.delta" not in _types(resp)
-            expected_motion = {"AMBIENT": {"play_emotion"},
-                               "IGNORE": {"idle_do_nothing", "head_tracking", "move_head", "play_emotion"}}
+            # head_tracking only on the first line of the night: tracking is always on.
+            expected_motion = {"AMBIENT": {"head_tracking", "play_emotion"},
+                               "IGNORE": {"idle_do_nothing", "head_tracking", "play_emotion"}}
             assert set(names) <= expected_motion[row["expect"]] and names
     # every utterance was logged regardless of decision
     sessions = list((tmp / "sessions").glob("*.jsonl"))
@@ -195,7 +196,9 @@ def test_warmup_does_not_open_the_follow_up_window(env):
     fake.chat_replies.append("IGNORE")
     resp = client.post("/v1/responses", json={
         "input": [{"role": "user", "content": "You descend into the cistern."}], "stream": True})
-    assert _names(resp) == ["idle_do_nothing"]
+    # Not answered. The warmup went out as JSON with no preface, so this, the first
+    # streamed line, is the one that switches tracking on.
+    assert "response.output_text.delta" not in _types(resp) and _names(resp) == ["head_tracking"]
 
 
 def test_session_end_without_a_session_is_a_clean_error(env):
@@ -298,6 +301,16 @@ def test_a_revised_line_after_mute_still_switches_tracking_off_and_plays_the_sle
     assert _calls(_turn(client, [*heard, _msg("user", "Natural twenty")])) == expected
     assert _calls(_turn(client, [*heard, _msg("user", "Natural twenty! No wait, nineteen.")])) == expected
     assert app.extensions["brain_state"].tracking is False
+
+
+def test_a_revised_first_line_nobody_spoke_to_rocky_still_switches_tracking_on(env):
+    """Tracking comes on with the first line of the night whoever it was said to. If that
+    line is revised, the response that carried the toggle was dropped with it."""
+    client, _fake, _tmp, app = env
+    assert _calls(_turn(client, [SYSTEM, _msg("user", "the door creaks")])) == [("head_tracking", {"enabled": True})]
+    revised = [SYSTEM, _msg("user", "the door creaks open slowly")]
+    assert _calls(_turn(client, revised)) == [("head_tracking", {"enabled": True})]
+    assert app.extensions["brain_state"].tracking is True
 
 
 def test_a_line_sent_with_no_history_is_never_a_revision(env):

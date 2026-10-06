@@ -68,15 +68,31 @@ def test_tool_result_echo_gets_an_empty_response_and_no_log_line(env):
     assert _session_log(tmp).count("\n") == 1
 
 
-def test_greeting_prompt_is_answered_with_a_wake_gesture_and_no_open_window(env):
+def test_greeting_prompt_switches_tracking_on_ahead_of_the_wake_gesture_and_opens_no_window(env):
     client, fake, _, app = env
     fake.responses_events.append([
         {"type": "response.output_text.delta", "delta": "Evening."},
         {"type": "response.completed", "response": {"id": "r", "output": []}},
     ])
     resp = client.post("/v1/responses", json=GREETING)
-    assert ("play_emotion", {"emotion": "welcoming"}) in _calls(resp) and "response.output_text.delta" in _types(resp)
+    assert _calls(resp) == [("head_tracking", {"enabled": True}), ("play_emotion", {"emotion": "welcoming"})]
+    assert "response.output_text.delta" in _types(resp)
     assert app.extensions["brain_state"].last_named_at is None
+    assert app.extensions["brain_state"].tracking is True
+
+
+def test_a_second_greeting_switches_tracking_on_again_for_the_new_app_session(env):
+    """The greeting opens a new app session, whose MovementManager starts with tracking
+    off. Toggles go out only on a change, so a brain still holding tracking on from the
+    last session would never send head_tracking(true) again and the head would stay still
+    all night."""
+    client, fake, _, app = env
+    assert ("head_tracking", {"enabled": True}) in _calls(client.post("/v1/responses", json=GREETING))
+    assert _calls(client.post("/v1/responses", json=GREETING)) == [
+        ("head_tracking", {"enabled": True}), ("play_emotion", {"emotion": "welcoming"})]
+    fake.chat_replies.append("IGNORE")          # the gate; three words make no reaction call
+    assert _calls(_say(client, "pass the dice")) == [("idle_do_nothing", {})]
+    assert app.extensions["brain_state"].tracking is True
 
 
 # --- review notes and gaps found reading the code ---
@@ -141,7 +157,7 @@ def test_a_greeting_answered_without_streaming_leaves_no_wake_cue_behind(env):
     client, fake, _, _ = env
     client.post("/v1/responses", json={**GREETING, "stream": False})
     fake.chat_replies.append("IGNORE")          # the gate; three words make no reaction call
-    assert _calls(_say(client, "pass the chips")) == [("idle_do_nothing", {})]
+    assert _calls(_say(client, "pass the chips")) == [("head_tracking", {"enabled": True})]
 
 
 def test_sight_continuation_keeps_the_camera_round_trip_and_drops_gesture_history(env):

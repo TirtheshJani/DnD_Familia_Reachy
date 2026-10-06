@@ -66,7 +66,7 @@ def test_shipped_example_persona_is_rocky_with_intent_gestures():
     for mood, (tool, arg) in per.gestures.items():
         assert tool == "play_emotion", mood
         assert arg in intents, f"{mood} uses {arg!r}, not an app emotion intent"
-    for mood in ("attentive", "amused", "alarmed", "thoughtful", "proud", "sad", "scared", "asleep", "awake"):
+    for mood in ("attentive", "amused", "alarmed", "thoughtful", "proud", "sad", "scared", "asleep", "awake", "cheer"):
         assert mood in per.gestures, mood
 
 

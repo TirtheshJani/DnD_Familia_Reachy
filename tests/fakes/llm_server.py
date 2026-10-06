@@ -12,6 +12,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 class FakeLLM:
     def __init__(self):
         self.chat_replies: deque[str] = deque()
+        # finish_reason for each chat reply, in step with chat_replies; "stop" once empty.
+        self.chat_finish: deque[str] = deque()
         self.responses_events: deque[list[dict]] = deque()
         self.responses_json: deque[dict] = deque()
         self.requests: list[dict] = []
@@ -40,7 +42,9 @@ class FakeLLM:
                 outer.requests.append({"path": self.path, "body": body})
                 if self.path.endswith("/chat/completions"):
                     text = outer.chat_replies.popleft() if outer.chat_replies else "IGNORE"
-                    self._send_json({"choices": [{"message": {"role": "assistant", "content": text}}]})
+                    finish = outer.chat_finish.popleft() if outer.chat_finish else "stop"
+                    self._send_json({"choices": [{"message": {"role": "assistant", "content": text},
+                                                  "finish_reason": finish}]})
                 elif self.path.endswith("/responses"):
                     if not body.get("stream"):
                         self._send_json(outer.responses_json.popleft() if outer.responses_json else {

@@ -1,4 +1,4 @@
-"""familiar-brain CLI: serve, label, gate-report, index."""
+"""familiar-brain CLI: serve, label, gate-report, index, learn."""
 from __future__ import annotations
 
 import argparse
@@ -86,6 +86,9 @@ def main(argv: list[str] | None = None) -> None:
     ix.add_argument("path", nargs="?")
     ix.add_argument("--edition", choices=["2014", "2024"])
     ix.add_argument("--config", default="config/brain.toml")
+    le = sub.add_parser("learn", help="summarise every session that has no summary yet, now; "
+                                      "needs llama-server up and is best run with no session going")
+    le.add_argument("--config", default="config/brain.toml")
     a = p.parse_args(argv)
     if a.cmd == "serve":
         from familiar_brain.app import main as serve_main
@@ -98,3 +101,6 @@ def main(argv: list[str] | None = None) -> None:
     elif a.cmd == "index":
         from familiar_brain.indexing import index_command
         index_command(a)
+    elif a.cmd == "learn":
+        from familiar_brain.learning import learn_command
+        learn_command(a)

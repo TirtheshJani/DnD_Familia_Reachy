@@ -10,12 +10,13 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, request, stream_with_context
 
-from familiar_brain import indexing, modes, tools
+from familiar_brain import indexing, learning, modes, tools
 from familiar_brain.attention import Attention
 from familiar_brain.config import load_config
 from familiar_brain.gate import Decision, Gate
 from familiar_brain.knowledge import build_context
 from familiar_brain.lexicon import Lexicon
+from familiar_brain.live_index import LiveIndexer
 from familiar_brain.llm import REACTION_INSTRUCTION, LLMClient
 from familiar_brain.motion import REACTION_MOODS, Choreographer
 from familiar_brain.persona import load_persona, render_system_prompt
@@ -34,14 +35,8 @@ from familiar_brain.responses_api import (
     wants_stream,
     with_instructions_and_tools,
 )
-from familiar_brain.robot import RobotDaemon
 from familiar_brain.session import SessionLog
-from familiar_brain.summariser import (
-    apply_retention,
-    load_players,
-    purge_session,
-    summarise_in_background,
-)
+from familiar_brain.summariser import apply_retention, purge_session
 from familiar_brain.state import BrainState
 from familiar_brain.timing import TurnTimer
 from familiar_brain.tools import (
@@ -72,7 +67,6 @@ class _PrefaceStart:
     """The one-shot state a preface spends, as it stood before the preface ran."""
 
     tracking: bool
-    glance_at: float
     gesture_at: float
     reaction_at: float
     cue: str | None
@@ -188,11 +182,17 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
     lookup_tool.bind(store)
     recall_tool.bind(store)
     sessions_dir = Path(cfg.paths.sessions_dir)
-    apply_retention(sessions_dir, store=store, retention_days=cfg.knowledge.retention_days)
-    players = load_players(cfg.paths.players)
+    learning.warn_if_no_players(cfg.paths.players)
+    learner = learning.Learner(sessions_dir, store=store, llm=llm, players_path=cfg.paths.players,
+                               active=lambda: log.active_id)
+    live = LiveIndexer(store)
+    # Catch-up is queued before retention runs, and retention leaves whatever the learner
+    # holds, so a session that was never ended cannot lose its raw log unlearnt.
+    learner.catch_up()
+    apply_retention(sessions_dir, store=store, retention_days=cfg.knowledge.retention_days,
+                    keep=learner.busy())
     upstream = Upstream(base_url=cfg.upstream.base_url, generate_slot=cfg.upstream.generate_slot,
                         brain_tool_names={s["name"] for s in tools.specs()})
-    robot = RobotDaemon(cfg.robot.daemon_url, timeout_s=cfg.robot.doa_timeout_s)
     # No mood call on addressed turns: it ran ahead of the first word, and live on
     # 2026-09-16 it timed out on 11 of 11 addressed turns under GPU contention, always
     # falling back to attentive, the emotion that played over Rocky's speech. The keyword
@@ -203,11 +203,12 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
         mood_classifier=None,
         reaction_classifier=lambda t: llm.mood(t, moods=REACTION_MOODS + ("none",), prompt=REACTION_INSTRUCTION),
     )
-    attention = Attention(state=state, doa=robot.doa, follow_up_window_s=cfg.gate.follow_up_window_s,
-                          linger_s=cfg.motion.tracking_linger_s, glance_gap_s=cfg.motion.glance_gap_s)
+    attention = Attention(state=state)
 
     app = Flask(__name__)
     app.extensions["brain_state"] = state  # exposed for tests and the companion UI
+    app.extensions["live_index"] = live
+    app.extensions["learner"] = learner
 
     def _log(text: str, decision: Decision, spoke: bool) -> None:
         if state.logging_enabled and log.active_id is not None:
@@ -233,16 +234,19 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
     def _preface(text: str, decision: Decision, now: float) -> list[dict]:
         """Robot-side tool calls that go out ahead of (or instead of) speech this turn.
 
-        Order: attention first (a tracking toggle or a glance), then a pending cue (mute,
-        unmute), then the mood of the reply on an addressed turn or a reaction to the
-        table on any other. The tracking toggle leads so that on the turn after a mute
-        the head stops following faces before the sleep gesture plays, not after it. A
-        muted brain sends at most the tracking-off toggle and its cue: no glance, no
-        reaction. A continuation passes no text, so it carries no mood or reaction.
+        Order: attention first (a tracking toggle), then a pending cue (mute, unmute),
+        then the mood of the reply on an addressed turn or a reaction to the table on any
+        other; an AMBIENT line always gets one (motion.AMBIENT_FALLBACK_MOOD). Every turn
+        kind runs this, so the first line of the night switches tracking on whatever the
+        gate made of it. The tracking toggle leads so that on the turn
+        after a mute the head stops following faces before the sleep gesture plays, and
+        after an unmute follows them again before the wake gesture. A muted brain sends at
+        most the tracking-off toggle and its cue: no reaction. A continuation passes no
+        text, so it carries no mood or reaction.
         """
         items: list[dict] = []
         try:
-            items += attention.items(decision, now)
+            items += attention.items()
             cue = state.consume_cue()
             if cue:
                 items += choreo.cue(cue, now)
@@ -251,7 +255,7 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
             if decision is Decision.ADDRESSED:
                 items += choreo.for_addressed(text, now)
             else:
-                items += choreo.for_table(text, now)
+                items += choreo.for_table(text, now, ambient=decision is Decision.AMBIENT)
         except Exception as e:  # a gesture is never worth the reply it would cost
             app.logger.error("preface failed after %d item(s): %s", len(items), e)
         return items
@@ -264,8 +268,8 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
         cue = state.consume_cue()  # BrainState has no peek; put it straight back
         if cue:
             state.set_cue(cue)
-        return _PrefaceStart(tracking=state.tracking, glance_at=state.last_glance_at,
-                             gesture_at=choreo.last_at, reaction_at=choreo.last_reaction_at, cue=cue)
+        return _PrefaceStart(tracking=state.tracking, gesture_at=choreo.last_at,
+                             reaction_at=choreo.last_reaction_at, cue=cue)
 
     def _rewind_if_revision(key: str | None, now: float) -> None:
         """Put back what a superseded version of this utterance spent, before its revision's
@@ -275,9 +279,9 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
         If the player carries on inside its reopen window, it replaces that user message
         with a transcript of the longer audio, asks again, and drops everything the first
         response sent, gestures included. A preface spends state only once: a tracking
-        toggle goes out only on a change, a cue only once, and a gesture or glance starts
-        its gap. Without this the revision the robot does get carries none of them, so
-        Rocky never tracks for the whole exchange, or keeps following faces after a mute.
+        toggle goes out only on a change, a cue only once, and a gesture starts its gap.
+        Without this the revision the robot does get carries none of them, so Rocky never
+        tracks at all, or keeps following faces after a mute.
 
         A revision has the same history before its last user message, because the message
         is replaced in place and user messages carry no id on the wire. The line after any
@@ -289,7 +293,6 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
                 and now - last_utterance["at"] < REVISION_WINDOW_S):
             app.logger.info("revision of the previous utterance: preface state put back")
             state.tracking = previous.tracking
-            state.last_glance_at = previous.glance_at
             choreo.last_at = previous.gesture_at
             choreo.last_reaction_at = previous.reaction_at
             if previous.cue:
@@ -367,6 +370,10 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
             # window: nobody at the table has said anything yet (compare deviation E7).
             text = ""
             decision = Decision.IGNORE if state.muted else Decision.ADDRESSED
+            # It also opens a new app session, whose MovementManager starts with tracking
+            # off. Toggles go out only on a change, so without this a brain still holding
+            # tracking on from the last session never sends it again (deviation P16).
+            state.tracking = False
             timer.mark("gate")
         else:
             text = _correct_user_text(req, lexicon)
@@ -473,29 +480,58 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
     def api_reindex():
         return jsonify(indexing.index_notes(store, notes_dir))
 
+    def _end_session() -> Path:
+        """Close the active session and queue it for summarising. The live indexer
+        finishes first, so none of its writes can land after the summary replaces them."""
+        live.end()
+        path = log.end()
+        learner.queue([path])
+        return path
+
     @app.post("/api/session/start")
     def api_session_start():
         # Notes edited between sessions are picked up here, so nobody has to restart
         # the stack to make the familiar aware of a new NPC.
         if notes_dir.exists():
             indexing.index_notes(store, notes_dir)
-        return jsonify(session=log.start())
+        # A start with a session still open used to start a new one over it, and the old
+        # one was never summarised. It is ended and queued instead.
+        ended = _end_session().stem if log.active_id is not None else None
+        sid = log.start()
+        live.begin(log.path)
+        # Queued after the start, so the learner sees the session and waits for its end.
+        learner.catch_up()
+        return jsonify(session=sid, ended=ended)
 
     @app.post("/api/session/end")
     def api_session_end():
         if log.active_id is None:  # SessionLog.path would raise, which Flask turns into a 500
             return jsonify(error="no active session"), 409
-        path = log.end()
-        summarise_in_background(path, store=store, llm=llm, players=players)
+        path = _end_session()
+        learner.kick()
         return jsonify(path=str(path), summarising=True)
+
+    @app.post("/api/learn")
+    def api_learn():
+        return jsonify(queued=learner.catch_up(), paused=log.active_id is not None)
 
     @app.delete("/api/session/<sid>")
     def api_session_purge(sid: str):
-        return jsonify(purged=purge_session(sessions_dir, sid, store=store))
+        # The live indexer would write the session's chunks back on its next batch, and
+        # the session log would recreate the file on the next line.
+        if sid == log.active_id:
+            return jsonify(error="that session is in progress; end it first"), 409
+        purged = purge_session(sessions_dir, sid, store=store)
+        # The campaign memory went with it if it held the session; the learner rebuilds it
+        # from the summaries that remain, now if idle, else when the session ends.
+        learner.kick()
+        return jsonify(purged=purged)
 
     @app.get("/api/sessions")
     def api_sessions():
-        ids = sorted({p.stem.replace(".summary", "") for p in sessions_dir.glob("*")})
+        # Sessions only: the campaign memory and its .prev live in the same folder.
+        ids = sorted({p.name.split(".", 1)[0] for pat in ("*.jsonl", "*.summary.md")
+                      for p in sessions_dir.glob(pat)})
         return jsonify(sessions=[{"id": i,
                                   "summary": (sessions_dir / f"{i}.summary.md").exists(),
                                   "raw": (sessions_dir / f"{i}.jsonl").exists()} for i in ids])

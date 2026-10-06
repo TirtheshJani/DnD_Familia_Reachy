@@ -72,6 +72,84 @@ def _reads_as_adjective(text: str, match: re.Match[str]) -> bool:
             or (after_word is not None and after_word.group(1).lower() in nouns))
 
 
+# Rocky replies only when spoken to, and players also talk ABOUT it. Live on 2026-09-16
+# the one uninvited reply in seventy lines came from an 868 word segment, minutes of
+# chatter the transcriber had merged, in which players explained the familiar to each
+# other: "we're doing uh rocky", "What's his name, sorry? Rocky." The rules below read
+# those shapes as mentions. Like the adjective rules they err towards not naming, and
+# like them they are narrow, because a missed vocative costs a player repeating the name.
+
+# Transcribed hesitations, skipped when looking at the words before the name.
+_FILLERS = r"(?:\s+(?:uh|um|uhm|er|erm))*"
+_MENTION_BEFORE = re.compile(
+    r"(?:"
+    # The name introduced as a name: "his name is Rocky", "it's called Rocky",
+    # "named Rocky", "we named him Rocky", "I call him Rocky".
+    r"\bname(?:'s|\s+is|\s+was)|\b(?:named|called)(?:\s+(?:him|her|it|them))?|\bcall\s+(?:him|her|it|them)"
+    # "we're doing rocky": the player choosing it as a familiar. Only with a first or
+    # third person subject, because "what are you doing Rocky" is a question to it.
+    r"|\b(?:we're|we\s+are|i'm|i\s+am|they're|he's|she's)\s+doing"
+    r"|\b(?:talk|talking|talked|speaking|ask|asking|asked)\s+about"
+    r")" + _FILLERS + r"\s+$", re.IGNORECASE)
+# The words above also end a question put to Rocky once the transcriber drops the comma
+# before its name: "what's this called Rocky", "what were we talking about Rocky". A
+# clause that opens with a question word, with the name last or before its "?", is that
+# question, and recall is what a familiar with notes is for.
+_CLAUSE = re.compile(r"[^.!?;:,]*$")
+_CLAUSE_OPENERS = frozenset({"so", "okay", "ok", "and", "but", "hey", "oh", "um", "uh", "well",
+                             "then", "wait", "sorry"})
+_QUESTION_WORDS = frozenset({
+    "what", "what's", "whats", "who", "who's", "whom", "whose", "where", "where's", "which",
+    "how", "how's", "why", "when", "did", "didn't", "do", "don't", "does", "can", "can't",
+    "could", "should", "would", "will", "shall", "is", "are", "was", "were", "have", "has",
+    "had", "may", "might",
+})
+_NAME_ENDS_QUESTION = re.compile(r"\s*(?:\?|[.!]?\s*$)")
+# "What's his name, sorry? Rocky." The name on its own answering a question about the
+# familiar's name. Only his, her, its or their name, or what it is called: "what was the
+# innkeeper's name? Rocky?" asks Rocky to remember. And only a bare answer, the name then
+# a stop or nothing: "So what's his name? Rocky, do you know?" asks Rocky too.
+_NAME_QUESTION_BEFORE = re.compile(
+    r"\b(?:(?:his|her|its|their)\s+name|familiar's\s+name|call\s+(?:him|her|it|them))\b"
+    r"[^.!?]{0,20}\?\s*$", re.IGNORECASE)
+_BARE_ANSWER = re.compile(r"\s*(?:[.!]|$)")
+# A possessive describes the familiar: "Rocky's eyes are glowing". "Rocky's turn" and
+# "Rocky's go" are the exception, handing the familiar the next move.
+_POSSESSIVE = re.compile(r"['\u2019]s\b(?:\s+(\w+))?", re.IGNORECASE)
+_POSSESSIVE_INVITES = frozenset({"turn", "go"})
+
+
+def _asks_rocky(head: str, after: str) -> bool:
+    words = _CLAUSE.search(head).group(0).lower().split()
+    while words and words[0] in _CLAUSE_OPENERS:
+        words.pop(0)
+    return bool(words) and words[0] in _QUESTION_WORDS and _NAME_ENDS_QUESTION.match(after) is not None
+
+
+def _reads_as_mention(text: str, match: re.Match[str]) -> bool:
+    head = text[:match.start()].replace("\u2019", "'")
+    after = text[match.end():]
+    if _MENTION_BEFORE.search(head) and not _asks_rocky(head, after):
+        return True
+    if _NAME_QUESTION_BEFORE.search(head) and _BARE_ANSWER.match(after):
+        return True
+    possessive = _POSSESSIVE.match(text, match.end())
+    return possessive is not None and (possessive.group(1) or "").lower() not in _POSSESSIVE_INVITES
+
+
+# A follow-up inside the window is a line to Rocky only if it is a line. Real follow-ups
+# live have run to about ten words ("Anything else?", "and then?"); over 60 words is
+# twenty seconds and more of unbroken speech, which is the transcriber gluing table
+# chatter together, as the 868 word segment was.
+_MAX_FOLLOW_UP_WORDS = 60
+# In such a run-on a naming counts only near the end, because the line just said to the
+# familiar is the last thing the transcriber glued on. The live run-on had 64 words after
+# its last "rocky". Words, not sentences, because transcripts often come back
+# unpunctuated. 25 words is about ten seconds of speech. A segment of 60 words or fewer
+# is one utterance, so a long recap request that starts with the name still counts.
+_MAX_WORDS_AFTER_NAMING = 25
+
+
 class Gate:
     def __init__(self, *, state: BrainState, name: str, aliases: Sequence[str],
                  follow_up_window_s: float, classifier: Classifier | None,
@@ -86,10 +164,16 @@ class Gate:
 
     def _named(self, text: str) -> bool:
         """In "Rocky, is the path rocky?" one naming use is enough to address the familiar."""
+        run_on = len(text.split()) > _MAX_FOLLOW_UP_WORDS
         for match in self._pattern.finditer(text):
-            if not _reads_as_adjective(text, match):
+            if run_on and len(text[match.end():].split()) > _MAX_WORDS_AFTER_NAMING:
+                log.info("%r is too far from the end of the segment to be a naming", match.group(0))
+            elif _reads_as_adjective(text, match):
+                log.info("%r reads as an ordinary word here, not a naming", match.group(0))
+            elif _reads_as_mention(text, match):
+                log.info("%r is talked about here, not spoken to", match.group(0))
+            else:
                 return True
-            log.info("%r reads as an ordinary word here, not a naming", match.group(0))
         return False
 
     def decide(self, segments: Sequence[str]) -> Decision:
@@ -112,16 +196,28 @@ class Gate:
                 # on every later turn until the familiar is named again.
                 self.state.window_extension_s = spoke - named
             deadline = named + self.window + (self.state.window_extension_s or 0.0)
-            if now < deadline:
+            if now >= deadline:
+                log.info("follow-up window closed at %.1f; handing back to the classifier", deadline)
+            elif len(last.split()) > _MAX_FOLLOW_UP_WORDS:
+                # Not counted as a follow-up either, so the chatter does not use one up.
+                log.info("a %d word segment is table chatter, not a follow-up", len(last.split()))
+            else:
                 self.state.count_follow_up()
                 return Decision.ADDRESSED
-            log.info("follow-up window closed at %.1f; handing back to the classifier", deadline)
         elif self.state.last_named_at is not None:
             log.info("follow-up chain hit %d; handing back to the classifier", self.max_follow_ups)
         if self.classifier is None:
             return Decision.IGNORE
         try:
-            return self.classifier(segments)
+            decision = self.classifier(segments)
         except Exception as e:  # timeout, HTTP error, unparseable
             log.warning("classifier failed (%s); defaulting to IGNORE", type(e).__name__)
             return Decision.IGNORE
+        # Speech needs a naming, the window after one, or Speak Now. The classifier used
+        # to answer ADDRESSED for lines "only Rocky could be expected to answer", which at
+        # a table of players asking each other questions is most of them, and it so often
+        # timed out live that it could not be relied on to say so either.
+        if decision is Decision.ADDRESSED:
+            log.info("classifier said ADDRESSED for an unnamed line; treating it as IGNORE")
+            return Decision.IGNORE
+        return decision

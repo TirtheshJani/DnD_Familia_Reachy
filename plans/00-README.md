@@ -25,3 +25,8 @@ The sources are AI transcripts of noisy rooms. Where a name or fact is uncertain
 - 07-session-recaps.md: what has happened so far, in fiction
 - 08-tone-and-boundaries.md: inspirations and the table's content lines
 - 09-lexicon.md: setting vocabulary, for speech recognition correction and quick reference
+- 10-nesh-canon.md: the DM's written setting canon (Nesh, the Song, memory, Hollows, the Titans, arriving at Nephria, the Twelve Declarations and Twenty-Five Doctrines). Overrides files 01 to 09 where they differ.
+
+## Canon corrections from file 10
+
+The world is named Nesh, the Waking Domain, a demiplane in the Astral Sea. The gate settlement is Northreach Crossing, not North Reach Plaza. Hollows fight back with reflective, radiant, and piercing power when provoked. The Sovereign's laws are the Twelve Declarations, interpreted by the Gold Masks through the Twenty-Five Doctrines. The coinage is the Crown, held by the Iron Bank of Maliburn. Two Titans of Memory, Eris and Thatos, dwell in the ocean.

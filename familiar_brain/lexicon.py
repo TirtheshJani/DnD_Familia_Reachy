@@ -9,6 +9,8 @@ from pathlib import Path
 # against "Alar" is the case that motivated the floor.
 MIN_FUZZY_LEN = 6
 FUZZY_CUTOFF = 0.86
+# A possessive on the end of a token: "Gatewarden's", "Neshians'".
+_SUFFIX = re.compile(r"(.+?)('s|')?$")
 
 
 class Lexicon:
@@ -53,10 +55,15 @@ class Lexicon:
         single_lower = [c.lower() for c in single]
 
         def fix(m: re.Match) -> str:
+            # The token keeps its apostrophe, so a possessive is matched without it and
+            # given it back: "Gatewarden's" scored 0.909 against "Gatewarden" and lost it.
+            # A plain plural of a canonical word ("gatewardens") is already right.
             w = m.group(0)
-            if len(w) < MIN_FUZZY_LEN or w.lower() in self._canon_lower:
+            base, suffix = _SUFFIX.match(w).groups()
+            if (len(base) < MIN_FUZZY_LEN or base.lower() in self._canon_lower
+                    or (base[-1:].lower() == "s" and base[:-1].lower() in self._canon_lower)):
                 return w
-            hit = difflib.get_close_matches(w.lower(), single_lower, n=1, cutoff=FUZZY_CUTOFF)
-            return self._canon_lower[hit[0]] if hit else w
+            hit = difflib.get_close_matches(base.lower(), single_lower, n=1, cutoff=FUZZY_CUTOFF)
+            return self._canon_lower[hit[0]] + (suffix or "") if hit else w
 
         return re.sub(r"[A-Za-z][A-Za-z'\-]+", fix, text)

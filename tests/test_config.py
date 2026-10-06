@@ -1,4 +1,7 @@
 from pathlib import Path
+
+import pytest
+
 from familiar_brain.config import load_config
 
 MINIMAL = """
@@ -60,19 +63,33 @@ retention_days = 7
     assert c.knowledge.retention_days == 7
 
 
-def test_robot_and_motion_sections_are_optional_with_defaults(tmp_path):
+def test_motion_section_is_optional_with_defaults(tmp_path):
     p = tmp_path / "brain.toml"
     p.write_text(MINIMAL)
     cfg = load_config(p)
-    assert cfg.robot.daemon_url == "" and cfg.robot.doa_timeout_s == 0.15
-    assert cfg.motion.min_gesture_gap_s == 6.0 and cfg.motion.reaction_gap_s == 15.0
-    assert cfg.motion.glance_gap_s == 12.0
-    assert cfg.motion.tracking_linger_s == 4.0 and cfg.motion.mode_timeout_s == 300.0
+    assert cfg.motion.min_gesture_gap_s == 6.0 and cfg.motion.reaction_gap_s == 10.0
+    assert cfg.motion.mode_timeout_s == 300.0
 
 
-def test_robot_and_motion_sections_load_when_present(tmp_path):
+def test_motion_section_loads_when_present(tmp_path):
     p = tmp_path / "brain.toml"
-    p.write_text(MINIMAL + '\n[robot]\ndaemon_url = "http://10.0.0.100:8000"\n[motion]\nglance_gap_s = 20\nreaction_gap_s = 30\n')
+    p.write_text(MINIMAL + '\n[motion]\nreaction_gap_s = 30\n')
+    assert load_config(p).motion.reaction_gap_s == 30.0
+
+
+def test_a_brain_toml_with_the_retired_glance_keys_still_loads(tmp_path):
+    """The DoA glances went when tracking became always on. A local brain.toml written
+    before that still has [robot] and the two motion keys, and must not stop the brain."""
+    p = tmp_path / "brain.toml"
+    p.write_text(MINIMAL + '\n[robot]\ndaemon_url = "http://10.0.0.100:8000"\ndoa_timeout_s = 0.15\n'
+                 '[motion]\nglance_gap_s = 20\ntracking_linger_s = 4\nreaction_gap_s = 30\n')
     cfg = load_config(p)
-    assert cfg.robot.daemon_url == "http://10.0.0.100:8000"
-    assert cfg.motion.glance_gap_s == 20.0 and cfg.motion.reaction_gap_s == 30.0
+    assert cfg.motion.reaction_gap_s == 30.0
+    assert not hasattr(cfg, "robot") and not hasattr(cfg.motion, "glance_gap_s")
+
+
+def test_a_misspelt_motion_key_still_fails_loudly(tmp_path):
+    p = tmp_path / "brain.toml"
+    p.write_text(MINIMAL + '\n[motion]\nreaction_gap = 30\n')
+    with pytest.raises(TypeError):
+        load_config(p)

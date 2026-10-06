@@ -57,3 +57,15 @@ Setting vocabulary, for speech-recognition correction and quick reference. Left 
 | reliquary shards | | a tracked homebrew resource |
 | mana wand | | consumable spell wand |
 | Rust map | | the DM's rough regional map |
+| Nesh, the Waking Domain | | the world; a demiplane in the Astral Sea |
+| Northreach Crossing | North Reach Plaza | the gate settlement (canonical spelling) |
+| the Gatewarden | | official who admits travellers at the gates |
+| rain ward | | cantrip shielding a person from rain |
+| Eris, the Seven-Headed Queen, the Consuming Tide | | Titan of Memory, devourer |
+| Thatos, the Memory Tide | Thanatos | Titan of Memory, preserver |
+| the Gold Masks | | keepers and interpreters of the Declarations |
+| the Blooded, Blooded Kin | | those of the Sovereign's blood |
+| the Declarations, the Doctrines | | the Realm's founding law and its interpretations |
+| Crowns | | the coinage |
+| the Iron Bank of Maliburn | | holds the Realm's treasury |
+| sennight | | a week; the binding period for newcomers |

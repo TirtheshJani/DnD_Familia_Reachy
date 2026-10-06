@@ -48,22 +48,13 @@ class Knowledge:
 
 
 @dataclass(frozen=True)
-class Robot:
-    # The robot daemon, read-only: the brain GETs /api/state/doa to aim glances and
-    # never writes to it (the conversation app owns the head). Empty disables DoA.
-    daemon_url: str = ""
-    doa_timeout_s: float = 0.15
-
-
-@dataclass(frozen=True)
 class Motion:
     # No two gestures closer than this, whatever their source.
     min_gesture_gap_s: float = 6.0
     # No two reactions to table lines closer than this; also skips the reaction call.
-    reaction_gap_s: float = 15.0
-    glance_gap_s: float = 12.0
-    # How long after the follow-up window closes head tracking stays on.
-    tracking_linger_s: float = 4.0
+    # Was 15 while every reaction cost a classify call; most now come from the free
+    # keyword rules (motion.TABLE_RULES), so a shorter gap costs the GPU nothing.
+    reaction_gap_s: float = 10.0
     # Thinking mode ends after this long without an addressed turn.
     mode_timeout_s: float = 300.0
 
@@ -75,10 +66,16 @@ class Config:
     gate: Gate
     paths: Paths
     knowledge: Knowledge
-    # Both sections are optional: load_config passes {} for a missing one, so a brain.toml
-    # written before they existed still loads.
-    robot: Robot = Robot()
+    # Optional: load_config passes {} for a missing section, so a brain.toml written
+    # before it existed still loads.
     motion: Motion = Motion()
+
+
+# Settings for the DoA glances, gone since head tracking became always on (deviation
+# P14). A brain.toml written before then still has them, so they are dropped on load
+# rather than failing it, and its [robot] section is never read; any other unknown key
+# still fails, so a typo is not silent.
+RETIRED_MOTION_KEYS = frozenset({"glance_gap_s", "tracking_linger_s"})
 
 
 def load_config(path: Path | str) -> Config:
@@ -89,6 +86,5 @@ def load_config(path: Path | str) -> Config:
         gate=Gate(**raw["gate"]),
         paths=Paths(**raw["paths"]),
         knowledge=Knowledge(**raw["knowledge"]),
-        robot=Robot(**raw.get("robot", {})),
-        motion=Motion(**raw.get("motion", {})),
+        motion=Motion(**{k: v for k, v in raw.get("motion", {}).items() if k not in RETIRED_MOTION_KEYS}),
     )

@@ -35,7 +35,6 @@ class BrainState:
         # What the brain last told the robot about head tracking. Toggles go out only
         # on a change, so the app's MovementManager is never told the same thing twice.
         self.tracking = False
-        self.last_glance_at: float = float("-inf")
         # Reply mode, see modes.py. "familiar" is the two-sentence table default.
         self.mode = "familiar"
         self.mode_set_at: float | None = None

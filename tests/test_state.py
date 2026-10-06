@@ -11,7 +11,6 @@ def test_cue_is_consumed_once():
 def test_fresh_state_is_not_tracking_and_in_familiar_mode():
     st = BrainState()
     assert st.tracking is False and st.mode == "familiar" and st.mode_set_at is None
-    assert st.last_glance_at == float("-inf")
 
 
 def test_ending_the_conversation_closes_the_follow_up_window_and_disarms_speak_now():
