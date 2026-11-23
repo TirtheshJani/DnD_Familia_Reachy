@@ -1,0 +1,28 @@
+# Append to config/lexicon.tsv. Columns: heard<TAB>canonical. Source: 2 October 2026 recordings.
+Brock	Brokk
+Brock Trinivane	Brokk Trenevain
+Trinivane	Trenevain
+Trinovane	Trenevain
+Trinivanes	Trenevains
+Craig	Krag
+Crag	Krag
+Brittle Bone	Brittlebone
+Calvis	Caldus
+Caldis	Caldus
+Nepheria	Nephria
+jade hall	Jade Halls
+jade halls	Jade Halls
+Gloam haunt	Gloamhaunt
+Vacora	Vacoran
+Vacoran amulet	Vacoran Amulet
+Ink Drinker	Inkdrinker
+Lil Ventil	Till
+# Phrase collisions: do NOT auto-correct these. They are ordinary English or near-names.
+# Correct only by hand when reviewing a log.
+# ever heard	Eberhard
+# called us	Caldus
+# carry	Kari
+# curry	Kari
+# jailhouse	Jade Halls
+# software	Sovereign
+# Rocky needs no entry: it transcribes cleanly.
