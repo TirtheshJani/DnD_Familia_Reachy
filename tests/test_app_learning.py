@@ -53,12 +53,17 @@ max_context_chars = 4800
 retention_days = 7
 """)
 
+    apps = []
+
     def _make():
         app = create_app(tmp_path / "brain.toml")
         app.config["TESTING"] = True
+        apps.append(app)
         return app
 
     yield _make, fake, store, tmp_path
+    for app in apps:
+        app.extensions["close"]()
     fake.close()
 
 

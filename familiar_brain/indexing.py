@@ -72,9 +72,11 @@ def open_store(cfg) -> Store:
 
     Returns a store that is ready to search: the embedder is already loaded.
     """
-    from familiar_brain.embeddings import BgeEmbedder
+    import os
+    from familiar_brain.embeddings import make_embedder
     Path(cfg.knowledge.db_path).parent.mkdir(parents=True, exist_ok=True)
-    store = Store(cfg.knowledge.db_path, embedder=BgeEmbedder())
+    kind = os.environ.get("FAMILIAR_EMBEDDER", "").strip() or getattr(cfg.knowledge, "embedder", "bge")
+    store = Store(cfg.knowledge.db_path, embedder=make_embedder(kind))
     warm_store(store)
     return store
 

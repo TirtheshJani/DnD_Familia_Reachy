@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Sequence
+import threading
+import time
+from typing import Callable, Sequence
 
 import requests
 
@@ -80,11 +82,26 @@ _MOOD_WORD = re.compile(r"[a-z]+")
 
 class LLMClient:
     def __init__(self, *, base_url: str, classify_slot: int, classify_timeout_s: float,
-                 generate_slot: int = 0):
+                 generate_slot: int = 0, classify_cooldown_s: float = 30.0,
+                 clock: Callable[[], float] = time.monotonic):
         self.base_url = base_url.rstrip("/")
         self.classify_slot = classify_slot
         self.classify_timeout_s = classify_timeout_s
         self.generate_slot = generate_slot
+        self.classify_cooldown_s = classify_cooldown_s
+        self._clock = clock
+        self._slot1_lock = threading.Lock()
+        self._slot1_cooldown_until: float = float("-inf")
+
+    def _slot1_available(self) -> bool:
+        with self._slot1_lock:
+            return self._clock() >= self._slot1_cooldown_until
+
+    def _trip_slot1_cooldown(self) -> None:
+        if self.classify_cooldown_s <= 0:
+            return
+        with self._slot1_lock:
+            self._slot1_cooldown_until = self._clock() + self.classify_cooldown_s
 
     def complete(self, messages: list[dict], max_tokens: int = 1200) -> str:
         """One non-streaming completion on the generate slot, for the session summariser.
@@ -107,6 +124,9 @@ class LLMClient:
         return choice["message"]["content"]
 
     def classify(self, segments: Sequence[str], *, persona_name: str) -> Decision:
+        if not self._slot1_available():
+            log.debug("classify skipped: slot 1 in cooldown")
+            return Decision.IGNORE
         # Only the last line. Design 5 layer 3 calls for the last four segments, but
         # measured on labelled table talk that context scored 4/12 with 7 uninvited
         # replies, against 11/12 and none for the last line alone: any earlier segment
@@ -126,8 +146,12 @@ class LLMClient:
             # a 600 ms timeout. Measured live: 286 ms with reasoning on, 59 ms with it off.
             "reasoning_effort": "none",
         }
-        r = requests.post(f"{self.base_url}/chat/completions", json=body, timeout=self.classify_timeout_s)
-        r.raise_for_status()
+        try:
+            r = requests.post(f"{self.base_url}/chat/completions", json=body, timeout=self.classify_timeout_s)
+            r.raise_for_status()
+        except (requests.Timeout, requests.ConnectionError):
+            self._trip_slot1_cooldown()
+            raise
         text = r.json()["choices"][0]["message"]["content"].strip().upper()
         # ADDRESSED is not on offer (see CLASSIFY_INSTRUCTION), so it does not parse
         # either: the gate then logs a failed call and stays silent.
@@ -149,6 +173,9 @@ class LLMClient:
         (motion.Choreographer), so None means the default mood on an addressed turn and no
         reaction on a table line.
         """
+        if not self._slot1_available():
+            log.debug("mood skipped: slot 1 in cooldown")
+            return None
         body = {
             "messages": [
                 {"role": "system", "content": prompt.format(moods=", ".join(moods))},
@@ -160,8 +187,12 @@ class LLMClient:
             "id_slot": self.classify_slot,
             "reasoning_effort": "none",
         }
-        r = requests.post(f"{self.base_url}/chat/completions", json=body, timeout=self.classify_timeout_s)
-        r.raise_for_status()
+        try:
+            r = requests.post(f"{self.base_url}/chat/completions", json=body, timeout=self.classify_timeout_s)
+            r.raise_for_status()
+        except (requests.Timeout, requests.ConnectionError):
+            self._trip_slot1_cooldown()
+            raise
         answer = r.json()["choices"][0]["message"]["content"]
         m = _MOOD_WORD.search(answer.lower())
         word = m.group() if m else ""

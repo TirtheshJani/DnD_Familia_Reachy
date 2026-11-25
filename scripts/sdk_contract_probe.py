@@ -57,9 +57,8 @@ def probe_warmup(client: OpenAI) -> None:
     check(r.id.startswith("resp_"), f"id is response-shaped, got {r.id!r}")
 
 
-def probe_ignore_stream(client: OpenAI) -> None:
-    """An unaddressed line must yield one idle tool call and no speech at all."""
-    print("2. IGNORE stream, dispatched the way speech-to-speech dispatches it")
+def _run_ignore_stream(client: OpenAI) -> tuple[list[tuple[str, str, str]], list[str], int]:
+    """Run one IGNORE stream and collect tool calls, text deltas, and completion count."""
     stream = client.responses.create(
         model="familiar",
         input=[{"type": "message", "role": "user",
@@ -81,6 +80,20 @@ def probe_ignore_stream(client: OpenAI) -> None:
                 texts.append("<message>")
         elif isinstance(ev, ResponseCompletedEvent):
             completed += 1
+    return tool_calls, texts, completed
+
+
+def probe_ignore_stream(client: OpenAI) -> None:
+    """An unaddressed line must yield one idle tool call and no speech at all."""
+    print("2. IGNORE stream, dispatched the way speech-to-speech dispatches it")
+    tool_calls, texts, completed = _run_ignore_stream(client)
+    if len(tool_calls) == 1 and tool_calls[0][0] == "head_tracking" and texts == []:
+        _, boot_call_id, boot_args = tool_calls[0]
+        check(boot_call_id.startswith("call_"),
+              f"boot sync call_id carries the required call_ prefix, got {boot_call_id!r}")
+        check(completed == 1, f"boot sync stream completes exactly once, got {completed}")
+        print(f"  ok   cold-boot head_tracking sync emitted silently ({boot_args}); checking follow-up IGNORE")
+        tool_calls, texts, completed = _run_ignore_stream(client)
     check(len(tool_calls) == 1, f"exactly one tool call, got {len(tool_calls)}")
     if tool_calls:
         name, call_id, args = tool_calls[0]

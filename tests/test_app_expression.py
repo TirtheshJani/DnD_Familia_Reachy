@@ -46,6 +46,7 @@ classify_slot = 1
 classify_timeout_s = 1.0
 [gate]
 follow_up_window_s = 8
+llm_classifier = true
 [paths]
 persona = "{persona.as_posix()}"
 sessions_dir = "{(tmp_path / 'sessions').as_posix()}"
@@ -58,10 +59,12 @@ retention_days = 7
 [motion]
 min_gesture_gap_s = 0
 reaction_gap_s = 0
+llm_reaction = true
 """)
     app = create_app(cfg)
     app.config["TESTING"] = True
     yield app.test_client(), fake, tmp_path, app
+    app.extensions["close"]()
     fake.close()
 
 

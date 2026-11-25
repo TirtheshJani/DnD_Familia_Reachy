@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Rocky // Familiar Companion</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="deco-backdrop" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand-row">
+        <div class="brand">
+          <svg class="brand-crest" viewBox="0 0 36 36" width="32" height="32" aria-hidden="true">
+            <polygon points="18,2 34,18 18,34 2,18" fill="none" stroke="currentColor" stroke-width="1.8"/>
+            <polygon points="18,7 29,18 18,29 7,18" fill="none" stroke="currentColor" stroke-width="1.2"/>
+            <circle cx="18" cy="18" r="3.5" fill="currentColor"/>
+          </svg>
+          <div>
+            <p id="brand-kicker" class="brand-kicker">SHADOWS OVER NEPHRIA</p>
+            <h1>Rocky <span class="slash">//</span> Familiar</h1>
+          </div>
+        </div>
+        <div id="primary-status-pill" class="status-pill state-listening" role="status" aria-live="polite">
+          <span id="primary-status-icon" class="pill-icon" aria-hidden="true">&#9670;</span>
+          <span id="primary-status-text">LISTENING</span>
+        </div>
+      </div>
+
+      <div class="deco-rule" aria-hidden="true"><span></span><i></i><span></span></div>
+
+      <dl class="telemetry-strip" aria-label="Live telemetry">
+        <div class="kpi-cell">
+          <dt>Session</dt>
+          <dd id="session-timer" class="mono">Idle</dd>
+        </div>
+        <div class="kpi-cell">
+          <dt>Latency</dt>
+          <dd id="latency-value" class="mono">&mdash;</dd>
+        </div>
+        <div class="kpi-cell">
+          <dt>Robot</dt>
+          <dd id="robot-badge">Checked: &mdash;</dd>
+        </div>
+        <div class="kpi-cell">
+          <dt>Speaker</dt>
+          <dd id="speaker-badge">&mdash;</dd>
+        </div>
+      </dl>
+
+      <div class="sub-telemetry">
+        <span>Mode: <strong id="mode-value">Familiar</strong></span>
+        <span>Tracking: <strong id="tracking-value">Off</strong></span>
+        <span>Logging: <strong id="logging-value">On</strong></span>
+        <span>Eyes: <strong id="camera-value">Closed</strong></span>
+        <span>Room: <strong id="ambient-value">Quiet</strong></span>
+      </div>
+    </div>
+  </header>
+
+  <main class="shell">
+    <div id="voice-boot-banner" class="feedback-banner voice-boot-banner hidden" role="status" aria-live="polite">
+      <span id="voice-boot-text">Voice engine warming up (Parakeet STT &amp; Kokoro TTS)...</span>
+      <span id="voice-boot-stage" class="meta-tag mono">WARMING</span>
+    </div>
+
+    <div id="feedback-banner" class="feedback-banner hidden" role="status" aria-live="polite">
+      <span id="feedback-text"></span>
+      <button type="button" class="banner-close" data-action="dismiss_banner" aria-label="Dismiss message">&times;</button>
+    </div>
+
+    <div class="layout-grid">
+      <div class="col-primary">
+        <section class="deco-card" aria-labelledby="heading-controls">
+          <div class="card-head">
+            <h2 id="heading-controls">Table Controls</h2>
+            <span id="session-id-tag" class="meta-tag mono">No active session</span>
+          </div>
+
+          <div class="controls-stack">
+            <button type="button" id="btn-speak-now" class="btn btn-brass btn-wide" data-action="speak_now">
+              <span class="btn-icon" aria-hidden="true">&#9672;</span>
+              <span>Speak Now (Arm Next Turn)</span>
+            </button>
+
+            <div class="controls-grid">
+              <button type="button" id="btn-mute" class="btn btn-danger-outline" data-action="mute">
+                <span class="btn-icon" aria-hidden="true">&#9632;</span>
+                <span>Mute</span>
+              </button>
+              <button type="button" id="btn-unmute" class="btn btn-emerald-outline" data-action="unmute">
+                <span class="btn-icon" aria-hidden="true">&#9654;</span>
+                <span>Unmute</span>
+              </button>
+              <button type="button" id="btn-mute-stop" class="btn btn-danger-solid col-span-2" data-action="mute_and_stop_logging">
+                <span class="btn-icon" aria-hidden="true">&#9888;</span>
+                <span>Mute &amp; Stop Logging</span>
+              </button>
+              <button type="button" id="btn-mode" class="btn btn-toggle" data-action="toggle_mode" aria-pressed="false">
+                <span class="btn-label-stack">
+                  <span class="btn-title">Mode Toggle</span>
+                  <span id="btn-mode-sub" class="btn-sub">Familiar (2 sentences)</span>
+                </span>
+              </button>
+              <button type="button" id="btn-deep-night" class="btn btn-toggle" data-action="toggle_deep_night" aria-pressed="false">
+                <span class="btn-label-stack">
+                  <span class="btn-title">Deep Night</span>
+                  <span id="btn-deep-night-sub" class="btn-sub">Awake</span>
+                </span>
+              </button>
+              <button type="button" id="btn-camera" class="btn btn-toggle col-span-2" data-plus-action="toggle_camera" aria-pressed="false">
+                <span class="btn-label-stack">
+                  <span class="btn-title">Camera Privacy (Eyes)</span>
+                  <span id="btn-camera-sub" class="btn-sub">Eyes Closed (table privacy)</span>
+                </span>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section class="deco-card" aria-labelledby="heading-robot">
+          <div class="card-head">
+            <h2 id="heading-robot">Robot &amp; Audio</h2>
+            <span id="robot-host-tag" class="meta-tag mono">unlinked</span>
+          </div>
+          <p id="robot-detail" class="status-detail">Robot status not checked yet.</p>
+          <div class="mic-meter-wrap" aria-label="Live Reachy microphone level">
+            <span class="mic-meter-label">Mic <strong id="audio-link-tag" class="mono">idle</strong></span>
+            <div class="mic-meter-track">
+              <div id="mic-meter-fill" class="mic-meter-fill" style="width: 0%"></div>
+            </div>
+            <span id="mic-meter-pct" class="meta-tag mono">0%</span>
+          </div>
+          <label class="dial-row" for="dial-speaker-boost">
+            <span class="dial-head"><span>Speaker Boost (Reachy Loudness)</span><strong id="val-speaker-boost" class="mono">+6.0 dB</strong></span>
+            <input id="dial-speaker-boost" class="deco-range" type="range" min="0" max="15" step="1" value="6">
+          </label>
+          <div class="controls-grid" style="margin-top: 10px;">
+            <button type="button" id="btn-speak-test" class="btn btn-brass" data-plus-action="speak_test">
+              <span>Speak Test</span>
+            </button>
+            <button type="button" id="btn-reset-audio" class="btn btn-neutral" data-plus-action="reset_audio">
+              <span>Reset Audio</span>
+            </button>
+            <button type="button" id="btn-reconnect-robot" class="btn btn-neutral" data-action="reconnect_robot">
+              <span>Reconnect Robot</span>
+            </button>
+            <button type="button" id="btn-refresh-robot" class="btn btn-neutral" data-action="refresh_robot">
+              <span>Check Status</span>
+            </button>
+          </div>
+        </section>
+
+        <section class="deco-card" aria-labelledby="heading-tars">
+          <div class="card-head">
+            <h2 id="heading-tars">TARS Personality &amp; Behavior</h2>
+            <span class="meta-tag">Live &amp; Voice Tunable</span>
+          </div>
+          <div class="chip-row" aria-label="Behavior presets">
+            <button type="button" class="chip" data-plus-action="apply_preset" data-preset="tars_default">TARS Default</button>
+            <button type="button" class="chip" data-plus-action="apply_preset" data-preset="quiet_table">Quiet Table</button>
+            <button type="button" class="chip" data-plus-action="apply_preset" data-preset="playful_gremlin">Playful Gremlin</button>
+          </div>
+          <div class="dial-stack">
+            <label class="dial-row" for="dial-humor">
+              <span class="dial-head"><span>Humor</span><strong id="val-humor" class="mono">75%</strong></span>
+              <input id="dial-humor" class="deco-range" type="range" min="0" max="100" step="5" value="75" data-dial="humor">
+            </label>
+            <label class="dial-row" for="dial-honesty">
+              <span class="dial-head"><span>Honesty (dice/rules always 100%)</span><strong id="val-honesty" class="mono">90%</strong></span>
+              <input id="dial-honesty" class="deco-range" type="range" min="0" max="100" step="5" value="90" data-dial="honesty">
+            </label>
+            <label class="dial-row" for="dial-expressiveness">
+              <span class="dial-head"><span>Creature Expressiveness</span><strong id="val-expressiveness" class="mono">60%</strong></span>
+              <input id="dial-expressiveness" class="deco-range" type="range" min="0" max="100" step="5" value="60" data-dial="expressiveness">
+            </label>
+            <label class="dial-row" for="dial-curiosity">
+              <span class="dial-head"><span>Music Sway &amp; Curiosity</span><strong id="val-curiosity" class="mono">50%</strong></span>
+              <input id="dial-curiosity" class="deco-range" type="range" min="0" max="100" step="5" value="50" data-dial="curiosity">
+            </label>
+            <label class="dial-row" for="dial-bravery">
+              <span class="dial-head"><span>Bravery (Skittish &#8596; Fierce)</span><strong id="val-bravery" class="mono">55%</strong></span>
+              <input id="dial-bravery" class="deco-range" type="range" min="0" max="100" step="5" value="55" data-dial="bravery">
+            </label>
+          </div>
+        </section>
+
+        <section class="deco-card" aria-labelledby="heading-whisper">
+          <div class="card-head">
+            <h2 id="heading-whisper">Silent Whisper &amp; Voice</h2>
+            <span class="meta-tag">Private to Phone</span>
+          </div>
+          <form id="chat-form" class="inline-form">
+            <label class="sr-only" for="chat-input">Whisper to Rocky silently</label>
+            <input id="chat-input" class="text-input" type="text" maxlength="400" placeholder="Ask Rocky silently (rules, lore, roll)..." autocomplete="off">
+            <button type="submit" id="btn-chat-send" class="btn btn-brass">Ask</button>
+          </form>
+          <div id="chat-reply" class="whisper-reply hidden" aria-live="polite"></div>
+          <div class="voice-row">
+            <label class="voice-label" for="voice-select">Kokoro Voice</label>
+            <select id="voice-select" class="text-input voice-select" aria-label="Kokoro TTS voice">
+              <option value="bm_fable">Fable (British, crisp &amp; dry)</option>
+              <option value="bm_george">George (British, warm baritone)</option>
+              <option value="bm_lewis">Lewis (British, thoughtful)</option>
+              <option value="bf_emma">Emma (British, articulate)</option>
+              <option value="am_fenrir">Fenrir (American, deep construct)</option>
+              <option value="am_michael">Michael (American, clear)</option>
+              <option value="af_heart">Heart (American, expressive)</option>
+            </select>
+          </div>
+        </section>
+
+        <section class="deco-card" aria-labelledby="heading-note">
+          <div class="card-head">
+            <h2 id="heading-note">Quick Note</h2>
+            <span class="meta-tag">Logged &amp; indexed</span>
+          </div>
+          <form id="note-form" class="inline-form">
+            <label class="sr-only" for="note-input">Quick note for session log</label>
+            <input id="note-input" class="text-input" type="text" maxlength="400" placeholder="Record NPC, clue, loot, or ruling..." autocomplete="off">
+            <button type="submit" class="btn btn-brass" data-action="send_note">Send Note</button>
+          </form>
+        </section>
+
+        <section class="deco-card" aria-labelledby="heading-transcript">
+          <div class="card-head">
+            <h2 id="heading-transcript">Live Transcript</h2>
+            <span id="transcript-count" class="meta-tag mono">0 turns</span>
+          </div>
+          <div id="transcript-list" class="transcript-list" aria-live="polite">
+            <p class="empty-state">No utterances recorded yet. Speak at the table or start a session.</p>
+          </div>
+        </section>
+      </div>
+
+      <div class="col-secondary">
+        <section class="deco-card" aria-labelledby="heading-session">
+          <div class="card-head">
+            <h2 id="heading-session">Session &amp; Memory</h2>
+            <span class="meta-tag">Live + Break Learning</span>
+          </div>
+          <div class="controls-grid">
+            <button type="button" id="btn-start-session" class="btn btn-emerald-outline" data-action="start_session">
+              <span>Start Session</span>
+            </button>
+            <button type="button" id="btn-checkpoint" class="btn btn-brass" data-action="checkpoint">
+              <span>Break Checkpoint</span>
+            </button>
+            <button type="button" id="btn-end-session" class="btn btn-neutral" data-action="end_session">
+              <span>End Session</span>
+            </button>
+            <button type="button" id="btn-reindex" class="btn btn-neutral" data-action="reindex">
+              <span>Reindex Notes</span>
+            </button>
+          </div>
+
+          <div class="sub-section">
+            <div class="sub-head">
+              <h3>Session Archive &amp; Purge</h3>
+              <button type="button" class="btn-link" data-action="refresh_sessions">Refresh</button>
+            </div>
+            <div id="session-list" class="session-list">
+              <p class="empty-state">No saved sessions found.</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="deco-card" aria-labelledby="heading-campaign">
+          <div class="card-head">
+            <h2 id="heading-campaign">Campaign &amp; Party Roster</h2>
+            <span id="campaign-roster-count" class="meta-tag mono">5 roles</span>
+          </div>
+          <div class="voice-row" style="margin-top: 0; margin-bottom: 10px;">
+            <label class="voice-label" for="campaign-select">Active Team</label>
+            <select id="campaign-select" class="text-input voice-select" aria-label="Active campaign or team profile">
+              <option value="nephria">Shadows over Nephria</option>
+            </select>
+          </div>
+
+          <div id="roster-list" class="enrolled-list" aria-label="Active party roster"></div>
+          <form id="roster-form" class="inline-form" style="margin-top: 8px;">
+            <label class="sr-only" for="roster-role-input">Add character or player role</label>
+            <input id="roster-role-input" class="text-input" type="text" maxlength="40" placeholder="Add party character (e.g. Vex, Guest)" autocomplete="off">
+            <button type="submit" class="btn btn-brass">Add</button>
+          </form>
+
+          <details class="deco-details">
+            <summary>+ New Campaign / Different Team</summary>
+            <form id="campaign-create-form" class="campaign-form">
+              <input id="new-campaign-name" class="text-input" type="text" maxlength="60" placeholder="Campaign / Team name (e.g. Friday One-Shot)" required>
+              <input id="new-campaign-setting" class="text-input" type="text" maxlength="140" placeholder="Setting (e.g. Gothic mists of Barovia)">
+              <input id="new-campaign-bound" class="text-input" type="text" maxlength="60" placeholder="Bound to (e.g. the party, or a character)">
+              <input id="new-campaign-roster" class="text-input" type="text" maxlength="200" placeholder="Characters comma-separated (e.g. DM, Mira, Thorne)">
+              <input id="new-campaign-secrets" class="text-input" type="text" maxlength="240" placeholder="Optional secrets never to reveal unprompted">
+              <button type="submit" class="btn btn-brass btn-wide">Create &amp; Switch Team</button>
+            </form>
+          </details>
+
+          <details class="deco-details">
+            <summary>Real Player Privacy Filter (stripped from memory)</summary>
+            <p class="helper-copy">Real first names here are never written into session summaries.</p>
+            <div id="privacy-names-list" class="enrolled-list"></div>
+            <form id="privacy-form" class="inline-form" style="margin-top: 8px;">
+              <label class="sr-only" for="privacy-name-input">Real first name to strip</label>
+              <input id="privacy-name-input" class="text-input" type="text" maxlength="40" placeholder="Add real first name to strip..." autocomplete="off">
+              <button type="submit" class="btn btn-neutral">Add</button>
+            </form>
+          </details>
+        </section>
+
+        <section class="deco-card" aria-labelledby="heading-speakers">
+          <div class="card-head">
+            <h2 id="heading-speakers">Speaker Roles</h2>
+            <span id="speakers-enabled-tag" class="meta-tag">Opt-in CPU</span>
+          </div>
+          <p class="helper-copy">Use character or role names only (never real player names).</p>
+
+          <div id="speaker-role-chips" class="chip-row" aria-label="Quick role suggestions">
+            <button type="button" class="chip" data-action="pick_role" data-role="DM">DM</button>
+            <button type="button" class="chip" data-action="pick_role" data-role="Brokk">Brokk</button>
+            <button type="button" class="chip" data-action="pick_role" data-role="Krag">Krag</button>
+            <button type="button" class="chip" data-action="pick_role" data-role="Till">Till</button>
+            <button type="button" class="chip" data-action="pick_role" data-role="Eberhard">Eberhard</button>
+          </div>
+
+          <form id="speaker-form" class="inline-form">
+            <label class="sr-only" for="speaker-role-input">Character or role name</label>
+            <input id="speaker-role-input" class="text-input" type="text" maxlength="40" placeholder="Role (e.g. DM, Brokk)" autocomplete="off">
+            <button type="submit" id="btn-enroll-speaker" class="btn btn-brass" data-action="enroll_speaker">Enroll (5s)</button>
+          </form>
+
+          <div id="enrolled-speakers" class="enrolled-list">
+            <p class="empty-state">No voice profiles enrolled. Rocky treats all speakers equally.</p>
+          </div>
+
+          <div class="card-footer-actions">
+            <button type="button" id="btn-clear-speakers" class="btn btn-danger-outline btn-wide" data-action="clear_speakers">
+              <span>Clear All Profiles</span>
+            </button>
+          </div>
+        </section>
+
+        <section class="deco-card" aria-labelledby="heading-initiative">
+          <div class="card-head">
+            <h2 id="heading-initiative">Initiative &amp; Quick Dice</h2>
+            <span id="initiative-current-tag" class="meta-tag mono">No turn active</span>
+          </div>
+          <div class="dice-bar" aria-label="Quick dice roller">
+            <button type="button" class="chip" data-plus-action="quick_roll" data-expr="1d20" data-adv="none">d20</button>
+            <button type="button" class="chip" data-plus-action="quick_roll" data-expr="1d20" data-adv="adv">d20 Adv</button>
+            <button type="button" class="chip" data-plus-action="quick_roll" data-expr="1d20" data-adv="dis">d20 Dis</button>
+            <button type="button" class="chip" data-plus-action="quick_roll" data-expr="1d12" data-adv="none">d12</button>
+            <button type="button" class="chip" data-plus-action="quick_roll" data-expr="1d8" data-adv="none">d8</button>
+            <button type="button" class="chip" data-plus-action="quick_roll" data-expr="1d6" data-adv="none">d6</button>
+          </div>
+          <div id="roll-output" class="roll-output hidden mono" aria-live="polite"></div>
+          <form id="initiative-form" class="inline-form">
+            <label class="sr-only" for="init-name">Combatant name</label>
+            <input id="init-name" class="text-input" type="text" maxlength="40" placeholder="Name (e.g. Brokk)" autocomplete="off">
+            <label class="sr-only" for="init-val">Initiative value</label>
+            <input id="init-val" class="text-input init-val-input" type="number" min="-10" max="50" placeholder="Init">
+            <button type="submit" class="btn btn-brass">Add</button>
+          </form>
+          <div id="initiative-list" class="enrolled-list">
+            <p class="empty-state">Combat order is empty.</p>
+          </div>
+          <div class="controls-grid">
+            <button type="button" class="btn btn-emerald-outline" data-plus-action="init_next">Next Turn</button>
+            <button type="button" class="btn btn-neutral" data-plus-action="init_clear">Clear Order</button>
+          </div>
+        </section>
+
+        <section class="deco-card" aria-labelledby="heading-memory">
+          <div class="card-head">
+            <h2 id="heading-memory">Nephria Campaign Memory</h2>
+            <button type="button" class="btn-link" data-plus-action="load_memory">Reload</button>
+          </div>
+          <label class="sr-only" for="memory-editor">Campaign memory markdown</label>
+          <textarea id="memory-editor" class="memory-textarea mono" rows="7" placeholder="Load to inspect or edit Rocky's campaign memory..."></textarea>
+          <div class="controls-grid">
+            <button type="button" class="btn btn-brass" data-plus-action="save_memory">Save &amp; Reindex</button>
+            <button type="button" class="btn btn-neutral" data-plus-action="load_memory">Load Latest</button>
+          </div>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <script src="/static/app.js" defer></script>
+  <script src="/static/companion_plus.js" defer></script>
+</body>
+</html>

@@ -7,10 +7,12 @@ base_url = "http://127.0.0.1:8080/v1"
 generate_slot = 0
 classify_slot = 1
 classify_timeout_s = 1.5
+classify_cooldown_s = 30
 
 [gate]
 follow_up_window_s = 8
 max_follow_ups = 3
+llm_classifier = false
 
 [paths]
 persona = "config/persona.yaml"
@@ -23,7 +25,8 @@ db_path = "data/familiar.db"
 notes_dir = "data/notes"
 chunks_per_corpus = 3
 max_context_chars = 4800
-retention_days = 7
+retention_days = 0
+embedder = "bge"
 
 [motion]
 min_gesture_gap_s = 6
@@ -31,3 +34,20 @@ min_gesture_gap_s = 6
 # keyword rules in motion.py, which cost nothing, so the table gets a look more often.
 reaction_gap_s = 10
 mode_timeout_s = 300
+llm_reaction = false
+
+[speakers]
+enabled = true
+backend = "auto"
+store_path = "data/speakers.json"
+tap_url = "http://127.0.0.1:8767"
+threshold = 0.72
+max_age_s = 15.0
+
+[behavior]
+humor = 75
+honesty = 90
+expressiveness = 60
+curiosity = 50
+bravery = 55
+camera_enabled = false

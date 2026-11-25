@@ -13,9 +13,12 @@ def bind(store: Store) -> None:
 SPEC = {
     "type": "function",
     "name": "lookup_rule",
-    "description": "Look up a rule. Returns the table's house rule first if one exists, then the best passage from the 2014 and 2024 rules. Say which you are citing and defer to the Dungeon Master.",
+    "description": "Look up a rule. Returns the table's house rule first if one exists, then the best passage, preferring the 2024 rules with 2014 as fallback. Say which you are citing and defer to the Dungeon Master.",
     "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
 }
+
+
+_EDITION_ORDER = {"2024": 0, "5.2.1": 1, "5.2": 2, "2014": 3, "5.1": 4}
 
 
 def run(args: dict) -> str:
@@ -30,7 +33,7 @@ def run(args: dict) -> str:
     for h in _STORE.search(query, corpus="rules", k=6):
         ed = h.meta.get("edition", "?")
         best.setdefault(ed, h)
-    for ed, h in sorted(best.items()):
+    for ed, h in sorted(best.items(), key=lambda kv: (_EDITION_ORDER.get(str(kv[0]), 9), str(kv[0]))):
         lines.append(f"{ed} rules, {h.title}: {h.text[:600]}")
     if not lines:
         return "I found nothing on that in the rulebooks."

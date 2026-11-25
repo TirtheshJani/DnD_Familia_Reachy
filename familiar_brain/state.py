@@ -10,10 +10,16 @@ class BrainState:
     def __init__(self):
         self._lock = threading.Lock()
         self.muted = False
+        self.asleep = False
         self.logging_enabled = True
         self._speak_now_armed = False
+        self.session_started_at: float | None = None
         self.last_spoke_at: float | None = None
+        self.last_turn_ms: float | None = None
+        self.last_speaker: str | None = None
+        self.last_speaker_confidence: float | None = None
         self.recent_segments: list[str] = []
+        self.transcript: list[dict] = []
         # When the familiar was last named, aliased, or armed by Speak Now. The
         # follow-up window hangs off this rather than off last_spoke_at, because
         # anchoring it to speech let every reply re-arm it. See docs/deviations.md E6.
@@ -42,6 +48,10 @@ class BrainState:
     def arm_speak_now(self) -> None:
         with self._lock:
             self._speak_now_armed = True
+
+    def disarm_speak_now(self) -> None:
+        with self._lock:
+            self._speak_now_armed = False
 
     def consume_speak_now(self) -> bool:
         with self._lock:
@@ -81,6 +91,34 @@ class BrainState:
 
     def remember(self, segment: str, keep: int = 4) -> None:
         self.recent_segments = (self.recent_segments + [segment])[-keep:]
+
+    def record_transcript(
+        self,
+        *,
+        text: str,
+        speaker: str | None,
+        decision: str,
+        spoke: bool,
+        ts: float,
+        keep: int = 50,
+    ) -> None:
+        entry = {
+            "text": text,
+            "speaker": speaker,
+            "decision": decision,
+            "spoke": spoke,
+            "ts": ts,
+        }
+        with self._lock:
+            self.transcript = (self.transcript + [entry])[-keep:]
+
+    def clear_transcript(self) -> None:
+        with self._lock:
+            self.transcript = []
+
+    def recent_transcript(self) -> list[dict]:
+        with self._lock:
+            return list(self.transcript)
 
     def reset_follow_ups(self) -> None:
         self.follow_ups = 0

@@ -27,8 +27,12 @@ class Attention:
     def __init__(self, *, state: BrainState):
         self.state = state
 
+    @property
+    def wants_tracking(self) -> bool:
+        return not (self.state.muted or self.state.asleep)
+
     def items(self) -> list[dict]:
-        want = not self.state.muted
+        want = self.wants_tracking
         if want == self.state.tracking:
             return []
         self.state.tracking = want

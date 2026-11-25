@@ -27,10 +27,15 @@ def build_context(store: Store, query: str, *, chunks_per_corpus: int, max_chars
 
     Returns "" when nothing was retrieved, so the caller can prepend unconditionally.
     """
+    results = (
+        store.search_corpora(query, CORPORA, k=chunks_per_corpus)
+        if hasattr(store, "search_corpora")
+        else {c: store.search(query, corpus=c, k=chunks_per_corpus) for c in CORPORA}
+    )
     found: dict[str, list[str]] = {}
     for corpus in CORPORA:
         found[corpus] = []
-        for h in store.search(query, corpus=corpus, k=chunks_per_corpus):
+        for h in results.get(corpus, ()):
             tag = f" ({h.meta['edition']} rules)" if corpus == "rules" and "edition" in h.meta else ""
             found[corpus].append(f"- [{corpus}] {h.title}{tag}: {h.text[:CHUNK_CHARS]}")
     kept: dict[str, list[str]] = {c: [] for c in CORPORA}

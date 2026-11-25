@@ -1,6 +1,6 @@
 +++
 schema_version = 1
-voice = "Aiden"
+voice = "bm_fable"
 hidden = false
 default_tools = [
   "move_head",

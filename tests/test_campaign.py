@@ -51,7 +51,8 @@ class MergeLLM:
 
 
 def _sessions(tmp: Path, **summaries: str) -> Path:
-    d = tmp / "sessions"; d.mkdir(exist_ok=True)
+    d = tmp / "sessions"
+    d.mkdir(exist_ok=True)
     for sid, text in summaries.items():
         (d / f"{sid}.summary.md").write_text(text, encoding="utf-8")
     return d
@@ -222,7 +223,8 @@ def test_what_to_do_next_reaches_the_open_threads(tmp_path):
 
 
 def test_the_learner_folds_each_new_summary_and_rebuilds_after_a_purge(tmp_path):
-    d = tmp_path / "sessions"; d.mkdir()
+    d = tmp_path / "sessions"
+    d.mkdir()
     for sid, text in (("20260916-a", "The well is poisoned."), ("20260923-b", "The crypt is cold.")):
         (d / f"{sid}.jsonl").write_text(json.dumps({"ts": 1, "text": text, "decision": "IGNORE",
                                                     "spoke": False}) + "\n", encoding="utf-8")
@@ -295,3 +297,39 @@ def test_a_session_summary_fact_is_still_retrievable_once_a_campaign_memory_exis
     assert not any("Decisions" in title for title, _, _ in _rows(store))  # a '- none' section
     hits = store.search("what was the seal on the letter?", corpus="sessions", k=3)
     assert any(h.source == "20260916-a.summary.md" for h in hits)
+
+
+def test_learner_recheck_rebuilds_remaining_sessions_when_purge_lands_mid_refresh(tmp_path):
+    import threading
+
+    d = _sessions(tmp_path, **{"20260916-a": S1, "20260923-b": S2})
+    store = _store(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    calls: list[str] = []
+
+    class BlockingLLM:
+        def complete(self, messages, max_tokens=1200):
+            content = messages[1]["content"]
+            calls.append(content)
+            if "20260923-b" in content:
+                entered.set()
+                release.wait(timeout=5.0)
+            return memory(str(len(calls)))
+
+    lr = Learner(d, store=store, llm=BlockingLLM(), players_path=tmp_path / "p.txt")
+    try:
+        assert lr.kick() is True
+        assert entered.wait(timeout=5.0)
+        # Purge 20260923-b while Learner is blocked inside _fold() for 20260923-b, then kick()
+        assert purge_session(d, "20260923-b", store=store) is True
+        assert lr.kick() is False  # already running; sets _recheck=True
+        release.set()
+        lr.close(timeout=5.0)
+        assert not campaign_due(d)
+        assert [sid for sid, _ in campaign.folded(d / CAMPAIGN_FILE)] == ["20260916-a"]
+    finally:
+        release.set()
+        lr.close(timeout=5.0)
+        store.close()
+

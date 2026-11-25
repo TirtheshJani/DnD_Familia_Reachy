@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import threading
 import uuid
 from typing import Iterator
 
@@ -24,6 +25,28 @@ class Upstream:
         self.brain_tool_names = brain_tool_names
         self.timeout_s = timeout_s
         self.reasoning_effort = reasoning_effort
+        self._local = threading.local()
+        self._sessions_lock = threading.Lock()
+        self._sessions: list[requests.Session] = []
+
+    def _session(self) -> requests.Session:
+        sess = getattr(self._local, "session", None)
+        if sess is None:
+            sess = requests.Session()
+            self._local.session = sess
+            with self._sessions_lock:
+                self._sessions.append(sess)
+        return sess
+
+    def close(self) -> None:
+        with self._sessions_lock:
+            sessions, self._sessions = self._sessions, []
+        self._local = threading.local()
+        for sess in sessions:
+            try:
+                sess.close()
+            except Exception:
+                pass
 
     def _with_defaults(self, body: dict, *, stream: bool) -> dict:
         """Gemma 4 is a reasoning model. Left alone it spends the output budget on a
@@ -37,8 +60,8 @@ class Upstream:
         return out
 
     def _post(self, body: dict) -> requests.Response:
-        r = requests.post(f"{self.base_url}/responses", json=self._with_defaults(body, stream=True),
-                          stream=True, timeout=self.timeout_s)
+        r = self._session().post(f"{self.base_url}/responses", json=self._with_defaults(body, stream=True),
+                                 stream=True, timeout=self.timeout_s)
         r.raise_for_status()
         # llama-server sends text/event-stream with no charset, for which requests assumes
         # Latin-1, so an apostrophe in a reply reached text-to-speech as three characters.
@@ -52,7 +75,7 @@ class Upstream:
         tools, so no brain-side tool round trip is attempted on this path.
         """
         body = self._with_defaults(copy.deepcopy(req), stream=False)
-        r = requests.post(f"{self.base_url}/responses", json=body, timeout=self.timeout_s)
+        r = self._session().post(f"{self.base_url}/responses", json=body, timeout=self.timeout_s)
         r.raise_for_status()
         return r.json()
 
@@ -64,9 +87,9 @@ class Upstream:
                 continue
             if line == "":
                 if buf:
-                    for l in buf.splitlines():
-                        if l.startswith("data: "):
-                            yield json.loads(l[6:])
+                    for line_part in buf.splitlines():
+                        if line_part.startswith("data: "):
+                            yield json.loads(line_part[6:])
                     buf = ""
             else:
                 buf += line + "\n"
@@ -94,34 +117,35 @@ class Upstream:
             # no nested item, so the item-shaped check below cannot see them. Collect the
             # ids as the items are announced and suppress anything pointing at them.
             hidden_item_ids: set[str] = set()
-            for ev in self._iter_events(self._post(body)):
-                etype = ev["type"]
-                item = ev.get("item") or {}
-                rid = (ev.get("response") or {}).get("id")
-                if rid:
-                    last_response_id = rid
-                if item.get("type") == "function_call" and item.get("name") in self.brain_tool_names:
-                    if item.get("id"):
-                        hidden_item_ids.add(item["id"])
-                    if etype == "response.output_item.done":
-                        pending.append(item)
-                    continue  # hide brain tool events from the client
-                if ev.get("item_id") in hidden_item_ids:
-                    continue
-                if etype == "response.completed":
-                    if pending:
-                        break  # do not forward completion yet; we have a round trip to do
-                    if must_speak and not answered and not asked_again:
-                        ask_again = True
-                        break  # hold the completion back; the client ends the turn on it
+            with self._post(body) as resp:
+                for ev in self._iter_events(resp):
+                    etype = ev["type"]
+                    item = ev.get("item") or {}
+                    rid = (ev.get("response") or {}).get("id")
+                    if rid:
+                        last_response_id = rid
+                    if item.get("type") == "function_call" and item.get("name") in self.brain_tool_names:
+                        if item.get("id"):
+                            hidden_item_ids.add(item["id"])
+                        if etype == "response.output_item.done":
+                            pending.append(item)
+                        continue  # hide brain tool events from the client
+                    if ev.get("item_id") in hidden_item_ids:
+                        continue
+                    if etype == "response.completed":
+                        if pending:
+                            break  # do not forward completion yet; we have a round trip to do
+                        if must_speak and not answered and not asked_again:
+                            ask_again = True
+                            break  # hold the completion back; the client ends the turn on it
+                        yield sse(ev)
+                        return
+                    if etype == "response.output_text.delta" and str(ev.get("delta") or "").strip():
+                        answered = True
+                    elif (etype == "response.output_item.done" and item.get("type") == "function_call"
+                          and item.get("name") == CAMERA_TOOL):
+                        answered = True
                     yield sse(ev)
-                    return
-                if etype == "response.output_text.delta" and str(ev.get("delta") or "").strip():
-                    answered = True
-                elif (etype == "response.output_item.done" and item.get("type") == "function_call"
-                      and item.get("name") == CAMERA_TOOL):
-                    answered = True
-                yield sse(ev)
             if ask_again:
                 log.warning("addressed turn came back without words; asking again with no tools")
                 asked_again = True

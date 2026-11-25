@@ -18,7 +18,7 @@ are not setting. An earlier `plans/0*.md` silently dropped file 10, the DM's can
 Rebuild the working copy with:
 
 ```bash
-mkdir -p data/notes/homebrew data/raw
+mkdir -p data/notes/homebrew data/raw data/rules
 cp plans/[0-9][0-9]-*.md data/notes/
 mv data/notes/05-house-rules.md data/notes/homebrew/house-rules.md
 # File 10 renames the gate settlement and makes Eris a Titan of Memory. Files 03, 04
@@ -28,6 +28,14 @@ mv data/notes/05-house-rules.md data/notes/homebrew/house-rules.md
 perl -pi -e 's/through the North Reach Plaza/through Northreach Crossing/; s/^### North Reach Plaza/### Northreach Crossing/' data/notes/03-nephria-city.md
 perl -pi -e 's/^\| North Reach Plaza \| \| entry slum \|/| Northreach Crossing | | entry slum |/' data/notes/09-lexicon.md
 perl -pi -e 's/may worship Styxian gods such as Eris\./may worship Styxian gods. Eris is not one of them: she is a Titan of Memory (see 10-nesh-canon.md)./' data/notes/04-factions-and-powers.md
+# Campaign update drop (13 October 2026)
+cp nephria-update/notes/*.md data/notes/
+cp nephria-update/homebrew/*.md data/notes/homebrew/
+cp nephria-update/docs/rocky-persona-facts.md docs/rocky-persona-facts.md
+# Official CC-BY-4.0 SRD 5.2.1 rules (2024 core rules)
+curl -fsSL -o data/rules/SRD_CC_v5.2.1.pdf https://media.dndbeyond.com/compendium-images/srd/5.2/SRD_CC_v5.2.1.pdf
+uv run familiar-brain index notes
+uv run familiar-brain index rules data/rules/SRD_CC_v5.2.1.pdf --edition 2024
 ```
 
 Edit the copies under `data/notes/`, not the originals under `plans/`, unless you mean

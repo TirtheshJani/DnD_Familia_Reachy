@@ -9,11 +9,28 @@ class Tracker:
     def add(self, name: str, value: int) -> None:
         self._entries[name] = value
 
+    def remove(self, name: str) -> bool:
+        if name in self._entries:
+            del self._entries[name]
+            order = self.order()
+            if not order:
+                self._idx = -1
+            elif self._idx >= len(order):
+                self._idx = 0
+            return True
+        return False
+
     def order(self) -> list[str]:
         return [n for n, _ in sorted(self._entries.items(), key=lambda kv: (-kv[1], kv[0]))]
 
     def show(self) -> list[tuple[str, int]]:
         return [(n, self._entries[n]) for n in self.order()]
+
+    def current(self) -> str | None:
+        order = self.order()
+        if not order or self._idx < 0 or self._idx >= len(order):
+            return None
+        return order[self._idx]
 
     def next(self) -> str | None:
         order = self.order()
@@ -23,7 +40,8 @@ class Tracker:
         return order[self._idx]
 
     def clear(self) -> None:
-        self._entries.clear(); self._idx = -1
+        self._entries.clear()
+        self._idx = -1
 
 
 TRACKER = Tracker()
@@ -58,5 +76,6 @@ def run(args: dict) -> str:
             return "Order is empty."
         return "Order: " + ", ".join(f"{n} ({v})" for n, v in rows)
     if a == "clear":
-        TRACKER.clear(); return "Order cleared."
+        TRACKER.clear()
+        return "Order cleared."
     return "Unknown initiative action."

@@ -176,15 +176,22 @@ class Gate:
                 return True
         return False
 
-    def decide(self, segments: Sequence[str]) -> Decision:
+    def decide(self, segments: Sequence[str], *, speaker_role: str | None = None) -> Decision:
         """segments: most recent last. Only the last segment is the candidate utterance."""
-        if self.state.muted:
+        if self.state.muted or self.state.asleep:
             return Decision.IGNORE
         last = segments[-1] if segments else ""
         now = self.clock()
         if self.state.consume_speak_now() or self._named(last):
             self.state.mark_named(now)
             return Decision.ADDRESSED
+        is_dm = bool(speaker_role and speaker_role.strip().lower() == "dm")
+        if is_dm:
+            # DM narration inside a follow-up window or table chatter is never interrupted,
+            # and closes any open player follow-up window so ambient table talk afterward
+            # does not receive an uninvited reply.
+            self.state.end_conversation()
+            return Decision.IGNORE
         # The window is anchored to naming, not to speech. Anchoring it to speech meant
         # every reply re-armed it, so the familiar answered the whole table forever.
         if self.state.last_named_at is not None and self.state.follow_ups < self.max_follow_ups:

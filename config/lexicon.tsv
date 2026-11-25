@@ -2,7 +2,7 @@
 # Applied to every transcript line before logging, gating and retrieval.
 # A canonical term with no variants is still useful: it is a fuzzy-match target.
 # Grow this after the live loop, from the heard forms in the session log.
-Nephria	Nefrea|Nephria-Nephria
+Nephria	Nefrea|Nephria-Nephria|Nepheria
 Xeria	
 Kulchith	
 Styx	sticks
@@ -10,7 +10,7 @@ Blackwater	black water
 Graywater Crossing	Greywater Crossing|Greywater
 The Greyest Water	Greyist Water
 The Drowned Pearl	Trial Pearl
-Trinivane	Trinifane|Trinity Estate
+Trenevain	Trinivane|Trinovane|Trinifane|Trinity Estate
 ADA	Ada
 Thraka	Thraca|Brocka|Taraka
 Stormak	Tormek|Tarmac
@@ -28,3 +28,23 @@ sennight	sen night
 sennights	
 Neshian	
 Neshians	
+Trenevains	Trinivanes
+Brokk	Brock
+Brokk Trenevain	Brock Trinivane
+Krag	Craig|Crag
+Brittlebone	Brittle Bone
+Caldus	Calvis|Caldis
+Jade Halls	jade halls|jade hall
+Gloamhaunt	Gloam haunt
+Vacoran	Vacora
+Vacoran Amulet	Vacoran amulet
+Inkdrinker	Ink Drinker
+Till	Lil Ventil
+# Phrase collisions from 2 October 2026 recordings: do NOT auto-correct these.
+# They are ordinary English or near-names; correct only by hand when reviewing a log.
+# Eberhard	ever heard
+# Caldus	called us
+# Kari	carry|curry
+# Jade Halls	jailhouse
+# Sovereign	software
+# Rocky needs no entry: it transcribes cleanly.

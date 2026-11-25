@@ -57,57 +57,72 @@ retention_days = 7
     app = create_app(cfg)
     app.config["TESTING"] = True
     yield app.test_client(), fake, tmp_path, app
+    app.extensions["close"]()
     fake.close()
 
 
 def _types(resp) -> list[str]:
-    return [json.loads(l[6:])["type"] for l in resp.get_data(as_text=True).splitlines() if l.startswith("data: ")]
+    return [json.loads(line[6:])["type"] for line in resp.get_data(as_text=True).splitlines() if line.startswith("data: ")]
 
 
 def _names(resp) -> list[str]:
     out = []
-    for l in resp.get_data(as_text=True).splitlines():
-        if l.startswith("data: "):
-            ev = json.loads(l[6:]); item = ev.get("item") or {}
+    for line in resp.get_data(as_text=True).splitlines():
+        if line.startswith("data: "):
+            ev = json.loads(line[6:])
+            item = ev.get("item") or {}
             if ev["type"] == "response.output_item.done" and item.get("type") == "function_call":
                 out.append(item["name"])
     return out
 
 
 def test_mock_session_speaks_only_when_addressed(env):
-    client, fake, tmp, app = env
-    client.post("/api/session/start")
-    for line in FIX.read_text().splitlines():
-        row = json.loads(line)
-        if row.get("after_window"):  # simulate silence long enough to close the follow-up window
-            bs = app.extensions["brain_state"]
-            bs.last_spoke_at -= 60
-            # The window is anchored to naming now, so backdating speech alone leaves
-            # it wide open. Both stamps have to move.
-            bs.last_named_at -= 60
-        if "classifier" in row:
-            fake.chat_replies.append(row["classifier"])
-        fake.responses_events.append([
-            {"type": "response.output_text.delta", "delta": "In character reply."},
-            {"type": "response.completed", "response": {"id": "r", "output": []}},
-        ])
-        resp = client.post("/v1/responses", json={"model": "familiar", "stream": True,
-                                                    "input": [{"role": "user", "content": row["text"]}], "tools": []})
-        assert resp.status_code == 200
-        names = _names(resp)
-        if row["expect"] == "ADDRESSED":
-            assert "idle_do_nothing" not in names and "response.output_text.delta" in _types(resp)
-        else:
-            assert "response.output_text.delta" not in _types(resp)
-            # head_tracking only on the first line of the night: tracking is always on.
-            expected_motion = {"AMBIENT": {"head_tracking", "play_emotion"},
-                               "IGNORE": {"idle_do_nothing", "head_tracking", "play_emotion"}}
-            assert set(names) <= expected_motion[row["expect"]] and names
-    # every utterance was logged regardless of decision
-    sessions = list((tmp / "sessions").glob("*.jsonl"))
-    assert len(sessions) == 1
-    logged = [json.loads(l) for l in sessions[0].read_text().splitlines()]
-    assert len(logged) == 8 and [r["decision"] for r in logged] == [json.loads(l)["expect"] for l in FIX.read_text().splitlines()]
+    _client, fake, tmp, _app = env
+    # Legacy mock_session.jsonl expects optional llm_classifier=true for row 3 ("Natural twenty!" -> AMBIENT).
+    cfg_path = tmp / "brain_clf.toml"
+    cfg_path.write_text((tmp / "brain.toml").read_text().replace(
+        "[gate]\n", "[gate]\nllm_classifier = true\n"
+    ))
+    clf_app = create_app(cfg_path)
+    clf_app.config["TESTING"] = True
+    try:
+        client = clf_app.test_client()
+        client.post("/api/session/start")
+        for line in FIX.read_text().splitlines():
+            row = json.loads(line)
+            if row.get("after_window"):  # simulate silence long enough to close the follow-up window
+                bs = clf_app.extensions["brain_state"]
+                bs.last_spoke_at -= 60
+                # The window is anchored to naming now, so backdating speech alone leaves
+                # it wide open. Both stamps have to move.
+                bs.last_named_at -= 60
+            if "classifier" in row:
+                fake.chat_replies.append(row["classifier"])
+            fake.responses_events.append([
+                {"type": "response.output_text.delta", "delta": "In character reply."},
+                {"type": "response.completed", "response": {"id": "r", "output": []}},
+            ])
+            resp = client.post("/v1/responses", json={"model": "familiar", "stream": True,
+                                                        "input": [{"role": "user", "content": row["text"]}], "tools": []})
+            assert resp.status_code == 200
+            names = _names(resp)
+            if row["expect"] == "ADDRESSED":
+                assert "idle_do_nothing" not in names and "response.output_text.delta" in _types(resp)
+            else:
+                assert "response.output_text.delta" not in _types(resp)
+                # head_tracking only on the first line of the night: tracking is always on.
+                expected_motion = {"AMBIENT": {"head_tracking", "play_emotion"},
+                                   "IGNORE": {"idle_do_nothing", "head_tracking", "play_emotion"}}
+                assert set(names) <= expected_motion[row["expect"]] and names
+        # every utterance was logged regardless of decision
+        sessions = list((tmp / "sessions").glob("*.jsonl"))
+        assert len(sessions) == 1
+        logged = [json.loads(line) for line in sessions[0].read_text().splitlines()]
+        assert len(logged) == 8 and [r["decision"] for r in logged] == [
+            json.loads(line)["expect"] for line in FIX.read_text().splitlines()
+        ]
+    finally:
+        clf_app.extensions["close"]()
 
 
 def test_mute_blocks_and_state_reports(env):
@@ -225,9 +240,10 @@ def _pair(name: str, args: dict, call_id: str, output: dict) -> list[dict]:
 
 def _calls(resp) -> list[tuple[str, dict]]:
     out = []
-    for l in resp.get_data(as_text=True).splitlines():
-        if l.startswith("data: "):
-            ev = json.loads(l[6:]); item = ev.get("item") or {}
+    for line in resp.get_data(as_text=True).splitlines():
+        if line.startswith("data: "):
+            ev = json.loads(line[6:])
+            item = ev.get("item") or {}
             if ev["type"] == "response.output_item.done" and item.get("type") == "function_call":
                 out.append((item["name"], json.loads(item["arguments"])))
     return out
@@ -393,9 +409,12 @@ def test_the_tool_follow_up_prefetch_is_answered_empty_and_changes_nothing(env):
     line = _msg("user", "Understudy, hello")
     _turn(client, [SYSTEM, line])
     bs = app.extensions["brain_state"]
-    snapshot = lambda: (list(bs.recent_segments), bs.last_named_at, bs.follow_ups, bs.tracking,
-                        bs.last_spoke_at, choreo_calls())
-    choreo_calls = lambda: len([r for r in fake.requests if r["path"].endswith("/chat/completions")])
+    def choreo_calls():
+        return len([r for r in fake.requests if r["path"].endswith("/chat/completions")])
+
+    def snapshot():
+        return (list(bs.recent_segments), bs.last_named_at, bs.follow_ups, bs.tracking,
+                bs.last_spoke_at, choreo_calls())
     before, requests_before = snapshot(), len(fake.requests)
     log_before = next((tmp / "sessions").glob("*.jsonl")).read_text()
     prefetch = [SYSTEM, line, *_pair("head_tracking", {"enabled": True}, "call_t", {"status": "following"}),
@@ -434,8 +453,9 @@ def test_history_compaction_goes_upstream_untouched_and_touches_no_state(env):
     assert next((tmp / "sessions").glob("*.jsonl")).read_text() == ""
 
 
-def test_no_mood_call_runs_before_a_reply_and_the_gate_keeps_its_budget(env, monkeypatch):
-    """The mood call ran before the first word and timed out on 11 of 11 live turns."""
+def test_no_mood_call_runs_before_a_reply_and_no_slot1_stalls_by_default(env, monkeypatch):
+    """By default both llm_classifier and llm_reaction are disabled, so unaddressed turns
+    make zero slot-1 HTTP calls and never suffer ReadTimeout chains."""
     import requests as rq
     client, _fake, _tmp, app = env
     real, seen = rq.post, []
@@ -447,9 +467,46 @@ def test_no_mood_call_runs_before_a_reply_and_the_gate_keeps_its_budget(env, mon
 
     monkeypatch.setattr(rq, "post", spy)
     _turn(client, [_msg("user", "Understudy, hello there")])
-    app.extensions["brain_state"].last_named_at -= 60   # past the window, so the gate asks
+    app.extensions["brain_state"].last_named_at -= 60   # past the window
     _turn(client, [_msg("user", "the innkeeper wipes down the long oak bar")])
-    mood = [t for prompt, t in seen if prompt.startswith("You choose the facial expression")]
-    gate = [t for prompt, t in seen if prompt.startswith("You are a strict filter")]
-    assert mood == []
-    assert gate == [1.0]                        # the gate keeps its configured budget
+    assert seen == []
+
+
+def test_optional_classifier_keeps_budget_and_cooldown_prevents_consecutive_stalls(env, monkeypatch):
+    """When llm_classifier and llm_reaction are explicitly enabled, the gate keeps its
+    timeout budget and a single slot-1 timeout trips cooldown so reaction_classifier and
+    subsequent turns do not stall sequentially."""
+    import requests as rq
+    _client, _fake, tmp, _app = env
+    cfg_path = tmp / "brain_opt.toml"
+    cfg_path.write_text((tmp / "brain.toml").read_text().replace(
+        "[gate]\n", "[gate]\nllm_classifier = true\n"
+    ) + "\n[motion]\nmin_gesture_gap_s = 0\nreaction_gap_s = 0\nllm_reaction = true\n")
+    opt_app = create_app(cfg_path)
+    opt_app.config["TESTING"] = True
+    try:
+        client = opt_app.test_client()
+        real, seen = rq.post, []
+        fail = {"on": False}
+
+        def spy(url, *a, **kw):
+            if url.endswith("/chat/completions"):
+                seen.append((kw["json"]["messages"][0]["content"], kw.get("timeout")))
+                if fail["on"]:
+                    raise rq.ReadTimeout("slot 1 busy")
+            return real(url, *a, **kw)
+
+        monkeypatch.setattr(rq, "post", spy)
+        _turn(client, [_msg("user", "the innkeeper wipes down the long oak bar")])
+        gate_timeouts = [t for prompt, t in seen if prompt.startswith("You are a strict filter")]
+        assert gate_timeouts == [1.0]
+
+        seen.clear()
+        fail["on"] = True
+        _turn(client, [_msg("user", "a goblin leaps from behind the barrels")])
+        _turn(client, [_msg("user", "everyone draws their weapons in the dark")])
+        # Only 1 HTTP attempt (classify on the first unaddressed line); reaction_classifier
+        # on that same turn and both calls on the next turn are skipped by slot-1 cooldown.
+        assert len(seen) == 1
+    finally:
+        opt_app.extensions["close"]()

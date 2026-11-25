@@ -45,3 +45,27 @@ def test_lookup_rule_prefers_house_rule(tmp_path):
     out = lookup_rule.run({"query": "how do Sanity skills work"})
     assert out.startswith("House rule") and "Sanity skills" in out
     assert "2014 rules" in out  # SRD still follows
+
+
+def test_lookup_rule_prefers_2024_over_2014_and_homebrew_over_both(tmp_path):
+    s = Store(tmp_path / "k.db", embedder=FakeEmbedder())
+    s.add_chunks([
+        Chunk("rules", "srd51.pdf", "Grappling", "Grapple 2014 old text.", {"edition": "2014"}),
+        Chunk("rules", "srd52.pdf", "Grappling", "Grapple 2024 new text.", {"edition": "2024"}),
+        Chunk("homebrew", "homebrew/house-rules-2026-10-02.md", "Grappling house rule", "Table grappling ruling.", {}),
+    ])
+    lookup_rule.bind(s)
+    out = lookup_rule.run({"query": "Grappling"})
+    assert out.index("House rule") < out.index("2024 rules") < out.index("2014 rules")
+
+
+def test_lookup_rule_prefers_521_over_51_fallback(tmp_path):
+    s = Store(tmp_path / "k.db", embedder=FakeEmbedder())
+    s.add_chunks([
+        Chunk("rules", "srd51.pdf", "Magic action", "Old 5.1 action rule.", {"edition": "5.1"}),
+        Chunk("rules", "SRD_CC_v5.2.1.pdf", "Magic action", "New 5.2.1 Magic action rule.", {"edition": "5.2.1"}),
+    ])
+    lookup_rule.bind(s)
+    out = lookup_rule.run({"query": "Magic action"})
+    assert out.index("5.2.1 rules") < out.index("5.1 rules")
+

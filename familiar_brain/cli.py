@@ -12,7 +12,7 @@ KEYS = {"a": "ADDRESSED", "m": "AMBIENT", "i": "IGNORE"}
 
 
 def _rows(path: Path) -> list[dict]:
-    return [json.loads(l) for l in Path(path).read_text(encoding="utf-8").splitlines() if l.strip()]
+    return [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def label_session(path: Path, *, stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> None:
@@ -80,7 +80,8 @@ def main(argv: list[str] | None = None) -> None:
     lab = sub.add_parser("label", help="label a session log with the expected gate decision")
     lab.add_argument("session")
     g = sub.add_parser("gate-report", help="score a labelled session and report latency")
-    g.add_argument("session"); g.add_argument("brain_log")
+    g.add_argument("session")
+    g.add_argument("brain_log")
     ix = sub.add_parser("index", help="index rules PDFs or campaign notes into the knowledge store")
     ix.add_argument("corpus", choices=["rules", "notes"])
     ix.add_argument("path", nargs="?")
@@ -99,8 +100,17 @@ def main(argv: list[str] | None = None) -> None:
     elif a.cmd == "gate-report":
         print(json.dumps(gate_report(Path(a.session), Path(a.brain_log)), indent=2))
     elif a.cmd == "index":
+        if a.corpus == "rules":
+            if not a.path or not a.edition:
+                raise SystemExit("index rules <pdf> --edition 2014|2024")
+            if not Path(a.path).is_file():
+                raise SystemExit(f"rules PDF not found: {a.path}")
         from familiar_brain.indexing import index_command
         index_command(a)
     elif a.cmd == "learn":
         from familiar_brain.learning import learn_command
         learn_command(a)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

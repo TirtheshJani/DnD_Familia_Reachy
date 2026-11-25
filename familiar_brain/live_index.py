@@ -59,6 +59,7 @@ class LiveIndexer:
         self._spawn = spawn
         self._lock = threading.Lock()
         self._stop: threading.Event | None = None
+        self._thread: threading.Thread | None = None
         self.path: Path | None = None
 
     def begin(self, path: Path) -> None:
@@ -74,13 +75,20 @@ class LiveIndexer:
             self._pending = 0
             self._pending_since: float | None = None
             stop = self._stop = threading.Event()
-        (self._spawn or _spawn)(lambda: self._run(stop))
+        thread = (self._spawn or _spawn)(lambda: self._run(stop))
+        if isinstance(thread, threading.Thread):
+            with self._lock:
+                if self._stop is stop:
+                    self._thread = thread
+                    return
+            if thread is not threading.current_thread():
+                thread.join(timeout=2.0)
 
     def _run(self, stop: threading.Event) -> None:
         while not stop.wait(TICK_S):
             self.tick()
 
-    def end(self) -> None:
+    def end(self, *, join: bool = True, flush: bool = True) -> None:
         """Index whatever is left and stop, before the log is handed to the summariser.
 
         Under the lock, so once this returns no tick can write this session's chunks again:
@@ -90,11 +98,18 @@ class LiveIndexer:
             if self._stop is not None:
                 self._stop.set()
                 self._stop = None
-            if self.path is None:
-                return
-            self._read()
-            self._flush()
-            self.path = None
+            thread = self._thread
+            self._thread = None
+            if self.path is not None:
+                if flush:
+                    self._read()
+                    self._flush()
+                self.path = None
+        if join and isinstance(thread, threading.Thread) and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+
+    def close(self) -> None:
+        self.end(join=True, flush=False)
 
     def tick(self, now: float | None = None) -> int:
         """Read new rows and index them if a batch is due. Returns chunks added."""

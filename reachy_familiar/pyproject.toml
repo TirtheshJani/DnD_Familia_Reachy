@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reachy_familiar"
+version = "0.1.0"
+description = "Rocky D&D Familiar native Reachy Mini app (wakes RTX 4080 brain, streams realtime audio, drives living-pet creature behaviors, serves Art Deco Companion UI)"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "requests>=2.31",
+]
+
+[project.entry-points."reachy_mini_apps"]
+reachy_familiar = "reachy_familiar.main:ReachyFamiliarApp"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["reachy_familiar*"]

@@ -107,3 +107,30 @@ def test_a_misheard_possessive_is_corrected_and_keeps_its_suffix(tmp_path):
     (tmp_path / "l.tsv").write_text("Gatewarden\t\n", encoding="utf-8")
     lex = Lexicon.load(tmp_path / "l.tsv")
     assert lex.correct("the Gatewardin's papers") == "the Gatewarden's papers"
+
+
+def test_shipped_lexicon_corrects_oct2_nephria_additions():
+    lex = Lexicon.load(SHIPPED)
+    assert lex.correct("Brock Trinivane met Craig and Crag") == "Brokk Trenevain met Krag and Krag"
+    assert lex.correct("Nepheria and Trinivane and Trinovane") == "Nephria and Trenevain and Trenevain"
+    assert lex.correct("the Trinivanes and Trenevains") == "the Trenevains and Trenevains"
+    assert lex.correct("Krag Brittle Bone") == "Krag Brittlebone"
+    assert lex.correct("Brother Calvis spoke to Caldis") == "Brother Caldus spoke to Caldus"
+    assert lex.correct("down in the jade hall and jade halls") == "down in the Jade Halls and Jade Halls"
+    assert lex.correct("a Gloam haunt with Vacora") == "a Gloamhaunt with Vacoran"
+    assert lex.correct("holding the Vacoran amulet and Ink Drinker") == "holding the Vacoran Amulet and Inkdrinker"
+    assert lex.correct("Lil Ventil called out") == "Till called out"
+
+
+def test_shipped_lexicon_preserves_oct2_collision_phrases():
+    lex = Lexicon.load(SHIPPED)
+    for safe in (
+        "have you ever heard of Eberhard",
+        "they called us at dusk",
+        "I will carry the curry",
+        "the jailhouse was quiet",
+        "new software for the Sovereign",
+        "Rocky, roll a d20",
+    ):
+        assert lex.correct(safe) == safe, safe
+

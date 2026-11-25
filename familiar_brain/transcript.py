@@ -29,11 +29,10 @@ SHORT_LINE_WORDS = 6
 _WORD = re.compile(r"[a-z0-9']+")
 
 
-def read_rows(path: Path | str) -> list[dict]:
-    """Every whole row of a session log. A line that does not parse is skipped rather than
-    fatal: the log is appended to while it is read, so the last line can be half written."""
+def parse_rows(text: str) -> list[dict]:
+    """Every whole row of JSONL text. A half-written or malformed line is skipped."""
     rows = []
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         if not line.strip():
             continue
         try:
@@ -41,6 +40,12 @@ def read_rows(path: Path | str) -> list[dict]:
         except json.JSONDecodeError:
             continue
     return rows
+
+
+def read_rows(path: Path | str) -> list[dict]:
+    """Every whole row of a session log. A line that does not parse is skipped rather than
+    fatal: the log is appended to while it is read, so the last line can be half written."""
+    return parse_rows(Path(path).read_text(encoding="utf-8"))
 
 
 def is_revision(earlier: str, later: str) -> bool:

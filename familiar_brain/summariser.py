@@ -6,7 +6,7 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, TypeVar
 
 from familiar_brain.chunking import markdown_chunks, split_soft
 from familiar_brain.retrieval import Chunk, Store
@@ -14,12 +14,48 @@ from familiar_brain.transcript import (
     DELIBERATE,
     DELIBERATE_WEIGHT,
     dedupe_revisions,
+    parse_rows,
     piece_chunks,
     read_rows,
     transcript_pieces,
 )
 
 log = logging.getLogger("familiar.summariser")
+
+_T = TypeVar("_T")
+_VALID_SID = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def validate_session_id(sid: str) -> str:
+    """Validate that a session ID is a single safe filename stem with no path traversal."""
+    if (
+        not isinstance(sid, str)
+        or not sid
+        or sid == "."
+        or ".." in sid
+        or "/" in sid
+        or "\\" in sid
+        or not _VALID_SID.fullmatch(sid)
+    ):
+        raise ValueError(f"invalid session id: {sid!r}")
+    return sid
+
+
+def _retry_win32(fn: Callable[[], _T], *, attempts: int = 5, delay_s: float = 0.015) -> _T:
+    """Retry brief Windows sharing violations (WinError 32 / 5) on unlink/replace."""
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except PermissionError as exc:
+            if (
+                os.name == "nt"
+                and getattr(exc, "winerror", None) in (5, 32)
+                and attempt + 1 < attempts
+            ):
+                time.sleep(delay_s)
+                continue
+            raise
+    raise RuntimeError("unreachable")
 
 # The fiction-only rules every prompt that writes memory shares: the session summary, its
 # window partials and merge, and the campaign memory (campaign.py).
@@ -53,8 +89,8 @@ def load_players(path: Path | str) -> list[str]:
     p = Path(path)
     if not p.exists():
         return []
-    return [l.strip() for l in p.read_text(encoding="utf-8").splitlines()
-            if l.strip() and not l.startswith("#")]
+    return [line.strip() for line in p.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.startswith("#")]
 
 
 def scrub_players(md: str, *, players: list[str]) -> tuple[str, int]:
@@ -85,7 +121,7 @@ EMPTY_SUMMARY = "Nothing was said in this session.\n"
 # A summary's write and a purge of the same session, one at a time. The model calls take
 # minutes and run outside it; only the check, the store swap and the file write are inside,
 # so a purge waits at most for one embedding batch.
-_LOCK = threading.Lock()
+_LOCK = threading.RLock()
 
 
 class Paused(Exception):
@@ -180,7 +216,7 @@ def write_atomic(path: Path, text: str) -> None:
     """A crash mid-write must not leave a half file that reads as finished work."""
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    _retry_win32(lambda: os.replace(tmp, path))
 
 
 def _labelled(parts: list[str]) -> list[str]:
@@ -215,6 +251,60 @@ def _map_reduce(spoken: list[str], notes: list[str], *, llm, players: list[str],
                max_tokens=MERGE_MAX_TOKENS, stop=stop)
 
 
+def _render_summary_md(said: list[dict], notes: list[str], *, llm, players: list[str], name: str,
+                       stop: Callable[[], bool] | None = None) -> str:
+    transcript = "\n".join(r["text"] for r in said)
+    if len(transcript) <= WINDOW_CHARS:
+        md = ask(llm, SUMMARY_PROMPT, transcript, players=players, what=name, stop=stop)
+    else:
+        spoken = [r["text"] for r in said if r.get("tag") != DELIBERATE]
+        md = _map_reduce(spoken, notes, llm=llm, players=players, name=name, stop=stop)
+    if notes:
+        md = md.rstrip("\n") + f"\n## {NOTES_HEADING}\n" + "".join(f"- {n}\n" for n in notes)
+        md, dropped = scrub_players(md, players=players)
+        if dropped:
+            log.warning("summariser dropped %d note line(s) naming players from %s", dropped, name)
+    return md
+
+
+def checkpoint_session(path: Path, *, store: Store, llm, players: list[str] = (),
+                       stop: Callable[[], bool] | None = None, snapshot: str | None = None) -> Path | None:
+    """Write a mid-session checkpoint summary beside the active raw log without touching
+    the live transcript chunks or marking the session complete (.summary.md)."""
+    path = Path(path)
+    players = list(players)
+    if snapshot is not None:
+        rows = parse_rows(snapshot)
+    else:
+        with _LOCK:
+            if not path.exists():
+                raise Purged(f"{path.name} was purged while it was being checkpointed; result dropped")
+            rows = read_rows(path)
+    lines = dedupe_revisions(rows)
+    out = path.with_suffix(".checkpoint.md")
+    sid = path.stem
+    said = [r for r in lines if r.get("tag") == DELIBERATE or not is_filler(r["text"])]
+    if not said:
+        return None
+    notes = [r["text"] for r in said if r.get("tag") == DELIBERATE]
+    md = _render_summary_md(said, notes, llm=llm, players=players, name=f"{path.name} checkpoint", stop=stop)
+    summary_chunks = [
+        Chunk("sessions", out.name, f"Session {sid}: {c.title}", c.text,
+              {"session": sid, "checkpoint": True},
+              DELIBERATE_WEIGHT if c.title == NOTES_HEADING else 1.5)
+        for c in markdown_chunks(md, source=out.name, corpus="sessions")
+    ]
+    with _LOCK:
+        if not path.exists():
+            raise Purged(f"{path.name} was purged while it was being checkpointed; result dropped")
+        if path.with_suffix(".summary.md").exists() or (stop is not None and stop()):
+            raise Paused("session already ended or paused")
+        store.add_chunks(summary_chunks, replace=(out.name,))
+        write_atomic(out, md)
+    log.info("checkpointed %s: %d checkpoint chunks", path.name, len(summary_chunks))
+    return out
+
+
 def summarise_session(path: Path, *, store: Store, llm, players: list[str] = (),
                       stop: Callable[[], bool] | None = None) -> Path:
     """Write a fiction-only summary beside the raw log and index both.
@@ -245,27 +335,22 @@ def summarise_session(path: Path, *, store: Store, llm, players: list[str] = (),
     """
     path = Path(path)
     players = list(players)
-    lines = dedupe_revisions(read_rows(path))
+    with _LOCK:
+        if not path.exists():
+            raise Purged(f"{path.name} was purged while it was being summarised; result dropped")
+        lines = dedupe_revisions(read_rows(path))
     out = path.with_suffix(".summary.md")
+    ckpt = path.with_suffix(".checkpoint.md")
     sid = path.stem
     said = [r for r in lines if r.get("tag") == DELIBERATE or not is_filler(r["text"])]
     notes = [r["text"] for r in said if r.get("tag") == DELIBERATE]
-    transcript = "\n".join(r["text"] for r in said)
     if not said:
         # No model call for a session where nothing was logged (one opened and closed at
         # once, or kept muted throughout), or nothing but "Yeah." and "Uh.". The file still
         # marks it learnt, so catch-up stops offering it and retention can let its raw log go.
         md = EMPTY_SUMMARY
-    elif len(transcript) <= WINDOW_CHARS:
-        md = ask(llm, SUMMARY_PROMPT, transcript, players=players, what=path.name, stop=stop)
     else:
-        spoken = [r["text"] for r in said if r.get("tag") != DELIBERATE]
-        md = _map_reduce(spoken, notes, llm=llm, players=players, name=path.name, stop=stop)
-    if notes:
-        md = md.rstrip("\n") + f"\n## {NOTES_HEADING}\n" + "".join(f"- {n}\n" for n in notes)
-        md, dropped = scrub_players(md, players=players)
-        if dropped:
-            log.warning("summariser dropped %d note line(s) naming players from %s", dropped, path.name)
+        md = _render_summary_md(said, notes, llm=llm, players=players, name=path.name, stop=stop)
     summary_chunks = [] if md == EMPTY_SUMMARY else [
         Chunk("sessions", out.name, f"Session {sid}: {c.title}", c.text, {"session": sid},
               DELIBERATE_WEIGHT if c.title == NOTES_HEADING else 1.5)
@@ -276,8 +361,13 @@ def summarise_session(path: Path, *, store: Store, llm, players: list[str] = (),
             raise Purged(f"{path.name} was purged while it was being summarised; result dropped")
         # The old chunks go in the same transaction the new ones arrive in, so re-summarising
         # replaces them instead of doubling them, and a failure keeps the live ones.
-        store.add_chunks(summary_chunks + raw_chunks, replace=(out.name, path.name))
+        store.add_chunks(summary_chunks + raw_chunks, replace=(out.name, path.name, ckpt.name))
         write_atomic(out, md)
+        if ckpt.exists():
+            try:
+                _retry_win32(ckpt.unlink)
+            except FileNotFoundError:
+                pass
     if md == EMPTY_SUMMARY:
         log.info("summarised %s: nothing was said", path.name)
     log.info("summarised %s: %d summary chunks, %d transcript chunks",
@@ -289,16 +379,19 @@ def apply_retention(sessions_dir: Path, *, store: Store, retention_days: int,
                     keep: set[str] = frozenset()) -> list[str]:
     """Drop raw transcripts past the retention window. Summaries are kept indefinitely.
 
-    Only a raw log that has been summarised is ever eligible: until then it is the only
-    record of the session, and the one live session so far (2026-09-16) was never ended,
-    so never summarised, and would have been deleted unlearnt a week later. `keep` names
-    raw logs the learner still holds (learning.Learner.busy), so a summary landing while
-    this runs cannot lose its log.
+    `retention_days <= 0` disables automatic deletion. Only a raw log that has been
+    summarised is ever eligible: until then it is the only record of the session.
+    `keep` names raw logs the learner still holds (learning.Learner.busy), and a
+    `<sid>.keep` marker file also protects a raw transcript from deletion.
     """
+    if retention_days <= 0:
+        return []
     cutoff = time.time() - retention_days * 86400
     removed: list[str] = []
     for raw in sorted(Path(sessions_dir).glob("*.jsonl")):
-        if raw.name in keep or not raw.with_suffix(".summary.md").exists():
+        if (raw.name in keep
+                or (raw.parent / f"{raw.stem}.keep").exists()
+                or not raw.with_suffix(".summary.md").exists()):
             continue
         if raw.stat().st_mtime < cutoff:
             store.delete_source(raw.name)
@@ -310,26 +403,34 @@ def apply_retention(sessions_dir: Path, *, store: Store, retention_days: int,
 
 
 def purge_session(sessions_dir: Path, session_id: str, *, store: Store) -> bool:
-    """Forget one session completely: raw log, summary, and every chunk of either.
+    """Forget one session completely: raw log, summary, checkpoint, and every chunk of any.
 
     The campaign memory goes too if it holds the session (campaign.forget_session), with
     no model call, since a purge can come mid-session; the learner rebuilds it from the
     summaries that remain at the next idle moment."""
+    validate_session_id(session_id)
+    base_dir = Path(sessions_dir).resolve()
+    raw = Path(sessions_dir) / f"{session_id}.jsonl"
+    if raw.resolve().parent != base_dir:
+        raise ValueError(f"invalid session id: {session_id!r}")
     # Imported here: campaign.py builds on this module's prompts and scrubbing.
     from familiar_brain.campaign import forget_session
 
-    raw = Path(sessions_dir) / f"{session_id}.jsonl"
     summ = raw.with_suffix(".summary.md")
+    ckpt = raw.with_suffix(".checkpoint.md")
     found = False
     # Under the lock summarise_session writes under, so a summary of this session still in
     # its model calls finds the raw log gone and drops its result instead of writing it back.
     with _LOCK:
-        for f in (raw, summ):
+        for f in (raw, summ, ckpt):
             # Whether or not the file is still there: chunks left under the name of a file
             # already gone would otherwise outlive every purge.
             found = store.delete_source(f.name) > 0 or found
             if f.exists():
-                f.unlink()
+                try:
+                    _retry_win32(f.unlink)
+                except FileNotFoundError:
+                    pass
                 found = True
     forget_session(sessions_dir, session_id, store=store)
     log.info("purge %s: %s", session_id, "removed" if found else "nothing to remove")

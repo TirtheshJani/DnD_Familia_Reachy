@@ -30,7 +30,14 @@ from typing import Callable
 
 from familiar_brain.chunking import markdown_chunks
 from familiar_brain.retrieval import Chunk, Store
-from familiar_brain.summariser import EMPTY_SUMMARY, FICTION_RULES, ask, write_atomic
+from familiar_brain.summariser import (
+    EMPTY_SUMMARY,
+    FICTION_RULES,
+    _LOCK as _SUMM_LOCK,
+    _retry_win32,
+    ask,
+    write_atomic,
+)
 
 log = logging.getLogger("familiar.campaign")
 
@@ -75,41 +82,72 @@ CAMPAIGN_PROMPT = (
 _HEADER = re.compile(r"^<!-- folded: (.*) -->\n")
 # One merge or forget at a time, so a purge from a request thread cannot interleave with
 # the learner writing the memory back.
-_LOCK = threading.Lock()
+_LOCK = threading.RLock()
 
 
 def _hash(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
 
 
-def foldable(sessions_dir: Path | str) -> list[tuple[str, str]]:
+def foldable(sessions_dir: Path | str, *, include_checkpoints: bool = False) -> list[tuple[str, str]]:
     """(session id, summary hash) for every summary with something in it, oldest first.
     Session ids start with the date and time, so their order is the order they were played."""
-    out = []
-    for p in sorted(Path(sessions_dir).glob("*.summary.md")):
-        text = p.read_text(encoding="utf-8")
-        if text != EMPTY_SUMMARY:
-            out.append((p.name[: -len(".summary.md")], _hash(text)))
+    d = Path(sessions_dir)
+    out: list[tuple[str, str]] = []
+    seen_sids: set[str] = set()
+    with _SUMM_LOCK:
+        for p in sorted(d.glob("*.summary.md")):
+            sid = p.name[: -len(".summary.md")]
+            seen_sids.add(sid)
+            try:
+                text = p.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                continue
+            if text != EMPTY_SUMMARY:
+                out.append((sid, _hash(text)))
+        if include_checkpoints:
+            for p in sorted(d.glob("*.checkpoint.md")):
+                sid = p.name[: -len(".checkpoint.md")]
+                if sid in seen_sids:
+                    continue
+                try:
+                    text = p.read_text(encoding="utf-8")
+                except FileNotFoundError:
+                    continue
+                if text and text != EMPTY_SUMMARY:
+                    out.append((sid, _hash(text)))
+            out.sort(key=lambda pair: pair[0])
     return out
 
 
 def folded(path: Path) -> list[tuple[str, str]]:
     """The summaries a campaign memory file was built from, in the order merged."""
-    if not path.exists():
-        return []
-    m = _HEADER.match(path.read_text(encoding="utf-8"))
-    return [tuple(pair.split("=", 1)) for pair in m.group(1).split()] if m else []
+    with _LOCK:
+        if not path.exists():
+            return []
+        try:
+            m = _HEADER.match(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return []
+        return [tuple(pair.split("=", 1)) for pair in m.group(1).split()] if m else []
 
 
 def read_body(path: Path) -> str:
     """The memory itself, without the bookkeeping line."""
-    return _HEADER.sub("", path.read_text(encoding="utf-8"), count=1) if path.exists() else ""
+    with _LOCK:
+        if not path.exists():
+            return ""
+        try:
+            return _HEADER.sub("", path.read_text(encoding="utf-8"), count=1)
+        except FileNotFoundError:
+            return ""
 
 
 def campaign_due(sessions_dir: Path | str) -> bool:
     """Whether the memory no longer matches the summaries: a cheap file read, so the learner
     can ask on every kick."""
-    return folded(Path(sessions_dir) / CAMPAIGN_FILE) != foldable(sessions_dir)
+    with _LOCK:
+        return folded(Path(sessions_dir) / CAMPAIGN_FILE) != foldable(sessions_dir)
 
 
 _NONE = re.compile(r"^(?:[-*]\s*)?none\.?$", re.IGNORECASE)
@@ -123,7 +161,7 @@ def campaign_chunks(body: str) -> list[Chunk]:
     sessions slot ("Loot and resources: - none" ranked second for "what should we do next?")."""
     out = []
     for c in markdown_chunks(body, source=CAMPAIGN_FILE, corpus="sessions"):
-        if all(_NONE.match(l.strip()) for l in c.text.splitlines() if l.strip()):
+        if all(_NONE.match(line.strip()) for line in c.text.splitlines() if line.strip()):
             continue
         cue = SECTION_CUES.get(c.title)
         title = f"Campaign memory: {c.title}" + (f" ({cue})" if cue else "")
@@ -145,7 +183,7 @@ def _cap(md: str) -> str:
     log.warning("campaign memory came back at %d characters, over the %d cap; dropping its oldest story",
                 len(md), CAMPAIGN_CAP)
     lines = md.splitlines(keepends=True)
-    heads = [i for i, l in enumerate(lines) if l.startswith("#")]
+    heads = [i for i, line in enumerate(lines) if line.startswith("#")]
     start = next((i for i in heads if _heading(lines[i]) == "story so far"), None)
     if start is not None:
         end = next((i for i in heads if i > start), len(lines))
@@ -158,7 +196,7 @@ def _cap(md: str) -> str:
             drop.add(i)
             over -= len(lines[i])
         if over <= 0:
-            return "".join(l for i, l in enumerate(lines) if i not in drop)
+            return "".join(line for i, line in enumerate(lines) if i not in drop)
     raise ValueError(f"campaign memory of {len(md)} characters will not fit the {CAMPAIGN_CAP} cap "
                      "by shortening its story; merge refused")
 
@@ -176,17 +214,30 @@ def _fold(body: str, sid: str, summary: str, *, llm, players: list[str]) -> str:
     return _cap(md if md.endswith("\n") else md + "\n")
 
 
-def _write(d: Path, body: str, done: list[tuple[str, str]], store: Store) -> bool:
+def _summary_text(d: Path, sid: str, *, include_checkpoints: bool = False) -> str:
+    with _SUMM_LOCK:
+        summ = d / f"{sid}.summary.md"
+        if summ.exists():
+            return summ.read_text(encoding="utf-8")
+        if include_checkpoints:
+            ckpt = d / f"{sid}.checkpoint.md"
+            if ckpt.exists():
+                return ckpt.read_text(encoding="utf-8")
+        return summ.read_text(encoding="utf-8")
+
+
+def _write(d: Path, body: str, done: list[tuple[str, str]], store: Store,
+           *, include_checkpoints: bool = False) -> bool:
     with _LOCK:
         # A summary purged or rewritten while the model was merging: writing this would bring
         # back what it said. Left due, for the next refresh to rebuild.
-        current = dict(foldable(d))
+        current = dict(foldable(d, include_checkpoints=include_checkpoints))
         if any(current.get(sid) != h for sid, h in done):
             log.warning("a session summary changed during the campaign merge; not written, will rebuild")
             return False
         mem = d / CAMPAIGN_FILE
         if mem.exists():
-            os.replace(mem, d / PREV_FILE)
+            _retry_win32(lambda: os.replace(mem, d / PREV_FILE))
         header = "<!-- folded: " + " ".join(f"{sid}={h}" for sid, h in done) + " -->\n"
         write_atomic(mem, header + body)
         store.delete_source(CAMPAIGN_FILE)
@@ -195,7 +246,8 @@ def _write(d: Path, body: str, done: list[tuple[str, str]], store: Store) -> boo
 
 
 def refresh_campaign(sessions_dir: Path | str, *, store: Store, llm, players: list[str] = (),
-                     stop: Callable[[], bool] = lambda: False) -> int:
+                     stop: Callable[[], bool] = lambda: False,
+                     include_checkpoints: bool = False) -> int:
     """Bring the campaign memory up to date with the summaries. Returns how many merges ran.
 
     New summaries later than every one already merged are merged in one at a time, each
@@ -207,31 +259,34 @@ def refresh_campaign(sessions_dir: Path | str, *, store: Store, llm, players: li
     d = Path(sessions_dir)
     players = list(players)
     mem = d / CAMPAIGN_FILE
-    want, have = foldable(d), folded(mem)
-    if have == want:
-        return 0
-    if not want:
-        with _LOCK:
+    with _LOCK:
+        want, have = foldable(d, include_checkpoints=include_checkpoints), folded(mem)
+        if have == want:
+            return 0
+        if not want:
             if mem.exists():
-                mem.unlink()
+                try:
+                    _retry_win32(mem.unlink)
+                except FileNotFoundError:
+                    pass
             store.delete_source(CAMPAIGN_FILE)
-        log.info("campaign memory removed: no session summaries remain")
-        return 0
-    if have and want[: len(have)] == have:
-        body, done = read_body(mem), list(have)
-    else:
-        if have:
-            log.info("campaign memory no longer matches the summaries; rebuilding from %d", len(want))
-        body, done = "", []
+            log.info("campaign memory removed: no session summaries remain")
+            return 0
+        if have and want[: len(have)] == have:
+            body, done = read_body(mem), list(have)
+        else:
+            if have:
+                log.info("campaign memory no longer matches the summaries; rebuilding from %d", len(want))
+            body, done = "", []
     merged = 0
     for sid, h in want[len(done):]:
         if stop():
             log.info("campaign memory: a session started; %d merge(s) left for later", len(want) - len(done))
             break
-        summary = (d / f"{sid}.summary.md").read_text(encoding="utf-8")
+        summary = _summary_text(d, sid, include_checkpoints=include_checkpoints)
         body = _fold(body, sid, summary, llm=llm, players=players)
         done.append((sid, h))
-        if not _write(d, body, done, store):
+        if not _write(d, body, done, store, include_checkpoints=include_checkpoints):
             break
         merged += 1
         log.info("campaign memory: merged %s (%d characters)", sid, len(body))
@@ -248,10 +303,40 @@ def forget_session(sessions_dir: Path | str, sid: str, *, store: Store) -> bool:
         for name in (CAMPAIGN_FILE, PREV_FILE):
             f = d / name
             if any(s == sid for s, _ in folded(f)):
-                f.unlink()
+                try:
+                    _retry_win32(f.unlink)
+                except FileNotFoundError:
+                    pass
                 dropped = True
                 if name == CAMPAIGN_FILE:
                     store.delete_source(CAMPAIGN_FILE)
     if dropped:
         log.info("campaign memory dropped: it held purged session %s; rebuilt when idle", sid)
     return dropped
+
+
+
+def save_manual_campaign(sessions_dir: Path | str, body: str, *, store: Store) -> int:
+    """Save a user-edited campaign-memory.md body atomically and reindex its chunks."""
+    d = Path(sessions_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    mem = d / CAMPAIGN_FILE
+    prev = d / PREV_FILE
+    clean = body.strip()
+    if len(clean) > CAMPAIGN_CAP * 2:
+        raise ValueError(f"campaign memory exceeds {CAMPAIGN_CAP * 2} character safety limit")
+    with _LOCK:
+        have = folded(mem)
+        header = ("<!-- folded: " + " ".join(f"{s}={h}" for s, h in have) + " -->\n") if have else ""
+        chunks = campaign_chunks(clean) if clean else []
+        if chunks:
+            store.add_chunks(chunks, replace=CAMPAIGN_FILE)
+        else:
+            store.delete_source(CAMPAIGN_FILE)
+        if mem.exists():
+            try:
+                _retry_win32(lambda: os.replace(mem, prev))
+            except FileNotFoundError:
+                pass
+        write_atomic(mem, header + clean + ("\n" if clean else ""))
+    return len(chunks)

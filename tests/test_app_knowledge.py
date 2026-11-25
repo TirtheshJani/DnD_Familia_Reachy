@@ -48,6 +48,7 @@ retention_days = 7
     app = create_app(tmp_path / "brain.toml")
     app.config["TESTING"] = True
     yield app.test_client(), fake, store, tmp_path
+    app.extensions["close"]()
     fake.close()
 
 

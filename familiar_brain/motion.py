@@ -19,6 +19,7 @@ import logging
 import re
 from typing import Callable
 
+from familiar_brain.behavior import BehaviorSnapshot, scale_reaction_gaps, tilt_threat_mood
 from familiar_brain.persona import Persona
 from familiar_brain.responses_api import call_item
 
@@ -29,8 +30,7 @@ MoodClassifier = Callable[[str], str | None]
 # The reactions Rocky may show to a line not spoken to it. The reaction call may also
 # answer "none"; anything outside this tuple is no gesture. cheer is a victory for the
 # party (success), split from amused (happy) so a slain dragon does not get the grin a
-# joke gets; the call can choose it because a victory narrated at length names no
-# keyword ("the beast crashes to the ground and does not rise").
+# joke gets; angry, joyful, and curious widen the living-creature palette.
 REACTION_MOODS: tuple[str, ...] = ("amused", "cheer", "alarmed", "sad", "scared")
 
 # Lines shorter than this never reach the reaction call: "pass the chips" is not
@@ -97,6 +97,13 @@ TABLE_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
                 r"|\bwe (killed|slew|got) (him|her|it|them|the \w+)\s*!"
                 rf"|{_STARTS}(huzzah|hurrah|hooray|victory)\b{_ENDS}"
                 r"|\b(nailed it|woo+ ?hoo+)\b|\bwoo+!", re.I), "cheer"),
+    # Betrayal, outrage, or fierce hostility in DM narration or table reaction.
+    (re.compile(r"\b(betray(ed|s|al)?|traitor|stabbed (us|him|her|them) in the back"
+                r"|how dare (you|he|she|they)|double[- ]cross(ed)?)\b", re.I), "angry"),
+    # Joyful wonder or treasure delight.
+    (re.compile(r"\b(marvelous|magnificent|treasure hoard|jackpot|that's amazing)\b", re.I), "joyful"),
+    # Curious intrigue on secret doors or arcane clues.
+    (re.compile(r"\b(secret (door|passage|compartment)|hidden door|mysterious glowing|strange rune)\b", re.I), "curious"),
     # Combat starts: Rocky leans in. This plays nothing over speech, as no reply follows.
     # Not in a question: "do I roll initiative or is this a surprise round?" is rules talk.
     (re.compile(r"\broll (for )?initiative\b(?![^.!]*\?)", re.I), LEAN_IN_MOOD),
@@ -160,6 +167,28 @@ def addressed_mood(text: str) -> str | None:
     return None
 
 
+_DEEP_NIGHT_ON = re.compile(
+    r"^\s*(?:(?:it['\u2019]s|it\s+is)\s+)?deep\s+night\b(?!\s+is\s+over)(?:[\s,!.:].*)?$",
+    re.IGNORECASE,
+)
+_DEEP_NIGHT_OFF = re.compile(
+    r"^\s*(?:deep\s+night\s+is\s+over|good\s+morning)(?:[\s,!.:].*)?$",
+    re.IGNORECASE,
+)
+
+
+def sleep_transition(text: str) -> bool | None:
+    """Return True to enter Deep Night, False to wake from it, or None if not a declaration."""
+    stripped = text.strip()
+    if not stripped or stripped.endswith("?"):
+        return None
+    if _DEEP_NIGHT_OFF.match(stripped):
+        return False
+    if _DEEP_NIGHT_ON.match(stripped):
+        return True
+    return None
+
+
 def tracking_item(enabled: bool) -> dict:
     return call_item("head_tracking", {"enabled": bool(enabled)})
 
@@ -176,15 +205,30 @@ class Choreographer:
 
     def __init__(self, persona: Persona, *, min_gap_s: float, reaction_gap_s: float,
                  clock: Callable[[], float], mood_classifier: MoodClassifier | None = None,
-                 reaction_classifier: MoodClassifier | None = None):
+                 reaction_classifier: MoodClassifier | None = None,
+                 behavior_provider: Callable[[], BehaviorSnapshot] | None = None):
         self.persona = persona
         self.min_gap_s = min_gap_s
         self.reaction_gap_s = reaction_gap_s
         self.clock = clock
         self.mood_classifier = mood_classifier
         self.reaction_classifier = reaction_classifier
+        self.behavior_provider = behavior_provider
         self.last_at: float = float("-inf")
         self.last_reaction_at: float = float("-inf")
+
+    def _effective_gaps(self) -> tuple[float, float] | None:
+        if self.behavior_provider is None:
+            return (self.min_gap_s, self.reaction_gap_s)
+        return scale_reaction_gaps(
+            self.min_gap_s, self.reaction_gap_s, self.behavior_provider().expressiveness
+        )
+
+    def _apply_bravery(self, mood: str | None) -> str | None:
+        if self.behavior_provider is None or mood is None:
+            return mood
+        tilted = tilt_threat_mood(mood, self.behavior_provider().bravery)
+        return tilted if tilted in self.persona.gestures else mood
 
     def gesture(self, mood: str) -> dict | None:
         spec = self.persona.gestures.get(mood)
@@ -197,7 +241,11 @@ class Choreographer:
         return call_item(tool, args)
 
     def _gated(self, mood: str | None, now: float) -> list[dict]:
-        if mood is None or now - self.last_at < self.min_gap_s:
+        gaps = self._effective_gaps()
+        if gaps is None:
+            return []
+        min_gap_s, _ = gaps
+        if mood is None or now - self.last_at < min_gap_s:
             return []
         item = self.gesture(mood)
         if item is None:
@@ -206,18 +254,12 @@ class Choreographer:
         return [item]
 
     def for_addressed(self, text: str, now: float) -> list[dict]:
-        """The gesture for a reply whose line carries a mood, or nothing.
-
-        A plain reply gets no emotion. Every addressed turn used to queue attentive, and on
-        the robot attentive1 runs 4.28 s from a start 17.8 degrees off neutral, so it played
-        over the first 1.3 to 2.2 s of speech. Live on 2026-09-16 TJ asked Rocky "what's
-        with the weird gestures and emotes that you have that go on constantly?". Rules
-        first: a hit for a mood with a gesture configured decides and skips the mood call.
-        Otherwise the call, if there is one, may name a mood; the default mood, no answer
-        or a mood with no gesture is no gesture, and spends no gap. A line that is only a
-        greeting or a goodbye waves (awake): once or twice a night, not once a reply.
-        """
-        if now - self.last_at < self.min_gap_s:
+        """The gesture for a reply whose line carries a mood, or nothing."""
+        gaps = self._effective_gaps()
+        if gaps is None:
+            return []
+        min_gap_s, _ = gaps
+        if now - self.last_at < min_gap_s:
             return []
         mood = addressed_mood(text)
         if mood not in self.persona.gestures and self.mood_classifier is not None:
@@ -232,18 +274,12 @@ class Choreographer:
         return self._gated(mood, now)
 
     def for_table(self, text: str, now: float, *, ambient: bool = False) -> list[dict]:
-        """A reaction to a line not spoken to Rocky, or nothing.
-
-        Both gaps are checked before any call is made, so a rate-limited turn costs no
-        round trip. Rules first; a rule mood this persona has no gesture for is left to
-        the call, as on an addressed turn. The one-token reaction call only when no rule
-        decided, and only for lines long enough to be narration, unless the gate said
-        AMBIENT (`ambient`): that is a burst of excitement or dismay, short by nature, and
-        gets AMBIENT_FALLBACK_MOOD when the call fails, gives no usable answer or picks a
-        mood this persona has no gesture for. An explicit "none" is an answer and plays
-        nothing: the classifier labels some narration AMBIENT, and none is right for it.
-        """
-        if now - self.last_at < self.min_gap_s or now - self.last_reaction_at < self.reaction_gap_s:
+        """A reaction to a line not spoken to Rocky, or nothing."""
+        gaps = self._effective_gaps()
+        if gaps is None:
+            return []
+        min_gap_s, reaction_gap_s = gaps
+        if now - self.last_at < min_gap_s or now - self.last_reaction_at < reaction_gap_s:
             return []
         mood = table_mood(text)
         if mood not in self.persona.gestures:
@@ -260,6 +296,7 @@ class Choreographer:
         if mood is None and ambient and answer != "none":
             log.info("ambient burst with no reaction; falling back to %s", AMBIENT_FALLBACK_MOOD)
             mood = AMBIENT_FALLBACK_MOOD
+        mood = self._apply_bravery(mood)
         items = self._gated(mood, now)
         if items and mood != LEAN_IN_MOOD:
             self.last_reaction_at = now

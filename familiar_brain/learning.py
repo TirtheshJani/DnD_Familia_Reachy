@@ -67,6 +67,9 @@ class Learner:
         self._queue: list[Path] = []
         self._current: Path | None = None
         self._running = False
+        self._recheck = False
+        self._thread: threading.Thread | None = None
+        self._closed = False
 
     def queue(self, paths: list[Path]) -> None:
         with self._lock:
@@ -97,20 +100,41 @@ class Learner:
         active. Returns whether it started. Work is a queued session, or a campaign memory
         that no longer matches the summaries (one purged since, or a merge that failed)."""
         with self._lock:
-            if self._running or self.active() is not None:
+            if self._closed or self.active() is not None:
+                return False
+            if self._running:
+                self._recheck = True
                 return False
             if not self._queue and not campaign_due(self.dir):
                 return False
             self._running = True
-        (self._spawn or _spawn)(self._drain)
+            self._recheck = False
+        thread = (self._spawn or _spawn)(self._drain)
+        if isinstance(thread, threading.Thread):
+            with self._lock:
+                if self._running:
+                    self._thread = thread
         return True
+
+    def close(self, timeout: float = 2.0) -> None:
+        with self._lock:
+            self._closed = True
+            thread = self._thread
+            self._thread = None
+        if isinstance(thread, threading.Thread) and thread is not threading.current_thread():
+            thread.join(timeout=timeout)
 
     def _drain(self) -> None:
         refreshed = False
         while True:
             with self._lock:
-                if self.active() is not None or (not self._queue and refreshed):
+                if self._recheck:
+                    self._recheck = False
+                    refreshed = False
+                if self._closed or self.active() is not None or (not self._queue and refreshed):
                     self._running = False
+                    if self._thread is threading.current_thread():
+                        self._thread = None
                     return
                 self._current = self._queue.pop(0) if self._queue else None
             if self._current is None:
@@ -148,12 +172,14 @@ class Learner:
                     self._current = None
 
     def _session_active(self) -> bool:
-        return self.active() is not None
+        return self._closed or self.active() is not None
 
     def _refresh_campaign(self) -> None:
-        if not campaign_due(self.dir):
+        if self._closed:
             return
         try:
+            if not campaign_due(self.dir):
+                return
             refresh_campaign(self.dir, store=self.store, llm=self.llm,
                              players=load_players(self.players_path), stop=self._session_active)
         except Exception as e:

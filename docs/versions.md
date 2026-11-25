@@ -12,8 +12,9 @@ RTX 4080 Laptop 12282 MiB, Windows 11 build 26200, WSL2 Ubuntu 24.04.
 | openai SDK (the client the brain must satisfy) | 2.28.0 | dependency of speech-to-speech |
 | llama.cpp | build 10751, variant `cuda130_hd5b56ce_0` | conda-forge |
 | llama-server reported version | 0.3.0-dev, commit 125c6d1 | `llama-server --version` |
-| Gemma 4 E4B GGUF | `ggml-org/gemma-4-E4B-it-GGUF:Q4_0`, repo sha `b8093469224f` | Hugging Face |
-| Qwen3-TTS | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`, ggml backend | Hugging Face, package default |
+| Gemma 4 E4B QAT GGUF | `unsloth/gemma-4-E4B-it-qat-GGUF:UD-Q4_K_XL` (sha `8c5a9e4fd548`) + `mmproj-BF16/F16` | Hugging Face |
+| Kokoro-82M TTS | `hexgrad/Kokoro-82M` (`kokoro==0.9.4`, `espeakng-loader==0.2.4`, `bm_fable`) | Hugging Face / PyPI |
+| Qwen3-TTS (benchmarked fallback) | `Serveurperso/Qwen3-TTS-GGUF` `0.6b-customvoice-Q8_0` / `BF16` | Hugging Face |
 | Parakeet-TDT | `nvidia/parakeet-tdt-0.6b-v3` on CUDA | Hugging Face, package default |
 | Smart Turn VAD | v3.2, `pipecat-ai/smart-turn-v3`, CPU provider | loaded automatically |
 | torch | 2.14.0+cu130, `cuda_available True` | PyPI |
@@ -23,10 +24,12 @@ RTX 4080 Laptop 12282 MiB, Windows 11 build 26200, WSL2 Ubuntu 24.04.
 | uv | 0.12.13 | |
 | reachy_mini daemon | 1.10.0, wireless, hardware id `3ce93bd07b69ca28` | `GET /api/daemon/status` |
 
-Two flags on the llama-server line are load-bearing and easy to lose in a tidy-up:
+> **Note (Wave 1 Production Stack):** The **Plan 1 / Plan 2** notes and baseline tables immediately below (`:Q4_0`, `qwen3`, and initial VRAM/latency measurements) are **superseded** by the **M5 Production Stack Upgrade & Benchmarks (2026-11-23)** section at the bottom of this file (`unsloth/gemma-4-E4B-it-qat-GGUF:UD-Q4_K_XL` + `q8_0` KV cache + `Kokoro-82M`).
 
-- **`:Q4_0`.** `-hf ...GGUF` with no suffix resolves to Q8_0 at 8.03 GB, which does not
-  leave room for Parakeet and Qwen3-TTS on a 12 GB card. Q4_0 is 4.59 GB.
+Two flags on the historical Plan 1 `llama-server` line were load-bearing and easy to lose in a tidy-up:
+
+- **`:Q4_0` (Plan 1 baseline, superseded by `:UD-Q4_K_XL`).** `-hf ...GGUF` with no suffix resolves to Q8_0 at 8.03 GB, which does not
+  leave room for Parakeet and TTS on a 12 GB card. Q4_0 was 4.59 GB; the current production stack uses Gemma 4 E4B-it QAT `UD-Q4_K_XL` with `-ctk q8_0 -ctv q8_0`.
 - **`--jinja`.** Without it llama-server ignores the `tools` array completely and
   returns `tool_calls: null`, so `roll`, `initiative` and `note` can never fire. Verified
   both ways against the live server.
@@ -128,13 +131,15 @@ distro even while resolving fine from Windows. Use the robot's address there, or
 `ROBOT_HOST=<ip>` to `check_env.sh`. The robot was reachable throughout at
 `10.0.0.100:8000` (`reachy_mini`, firmware 1.10.0).
 
-## Working commands
+## Working commands (Historical Plan 1 Baseline — Superseded by M5 Below)
+
+> **Superseded:** Use `./scripts/start_all.sh` (configured with Gemma 4 E4B-it QAT `UD-Q4_K_XL` and `Kokoro-82M`). The individual `Q4_0` + `qwen3` commands and tables in this section are preserved for historical comparison only.
 
 ```bash
-# everything at once
+# everything at once (current production stack)
 ./scripts/start_all.sh
 
-# or individually
+# historical Plan 1 individual commands (superseded)
 ~/miniforge3/envs/llama/bin/llama-server -hf ggml-org/gemma-4-E4B-it-GGUF:Q4_0 \
   -np 2 -c 32768 -fa on --swa-full --jinja --port 8080 --host 127.0.0.1
 
@@ -151,10 +156,10 @@ export LD_LIBRARY_PATH="$(find ~/.venvs/s2s/lib/python*/site-packages/nvidia -na
 Note there is no `--mode realtime`; `serve` is the realtime server in 1.0.0. See
 `docs/protocol-notes.md` section 7 for the full flag reconciliation.
 
-## Measurements
+## Measurements (Historical Plan 1 Baseline — Superseded by M5 Below)
 
 VRAM, measured with `nvidia-smi --query-gpu=memory.used --format=csv,noheader`
-against the 12282 MiB total:
+against the 12282 MiB total (historical `:Q4_0` + `Qwen3-TTS` baseline):
 
 | State | VRAM used | of 12282 MiB |
 |---|---|---|
@@ -339,3 +344,84 @@ The cold load is now paid during `create_app` by `indexing.warm_store`, not on t
 thing said at the table. See deviation P11 for why that mattered more than it looks: the
 cold load was longer than the whole follow-up window. Expect `familiar-brain serve` to
 take about twelve seconds longer to answer `/api/state` than it did in Plan 1.
+
+---
+
+## M5 Production Stack Upgrade & Benchmarks (2026-11-23)
+
+### WSL2 `/mnt/c` Automount & Windows Launcher
+
+- `/etc/wsl.conf` previously had `[automount] enabled = false`, leaving `/mnt/c` empty. Updated to `[automount] enabled = true` and applied via `wsl --shutdown` so `C:\` automounts cleanly at `/mnt/c` on every WSL2 start.
+- Windows one-click launch: `launch_rocky.bat` (at repo root) -> `scripts/launch.ps1`.
+  - Supports `-DryRun`, `-SkipRobot`, `-AutoSession`, `-NoAudioTap`, `-RobotHost`.
+  - Cleans stale `SSL_CERT_FILE` in WSL2 (`unset SSL_CERT_FILE` + `/etc/ssl/certs/ca-certificates.crt`).
+  - Checks Hyper-V firewall rules for **both** TCP `8765` (`speech-to-speech` / `AudioTapProxy`) and TCP `8090` (`familiar-brain` Companion UI). Missing rule remediation (Administrator PowerShell):
+
+```powershell
+New-NetFirewallHyperVRule -Name "WSL-s2s-8765" -DisplayName "speech-to-speech 8765 (WSL)" `
+  -Direction Inbound -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' `
+  -Protocol TCP -LocalPorts 8765 -Action Allow
+New-NetFirewallHyperVRule -Name "WSL-brain-8090" -DisplayName "familiar-brain 8090 (WSL)" `
+  -Direction Inbound -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' `
+  -Protocol TCP -LocalPorts 8090 -Action Allow
+```
+
+### Gemma 4 E4B-it QAT + KV Cache Quantization
+
+Upgraded `llama-server` in `scripts/start_all.sh` to:
+
+```bash
+"$LLAMA_BIN" -hf "unsloth/gemma-4-E4B-it-qat-GGUF:UD-Q4_K_XL" --mmproj-auto \
+  -np 2 -c 32768 -fa on -ctk q8_0 -ctv q8_0 --swa-full \
+  --jinja --reasoning off --reasoning-effort none \
+  --port 8080 --host 127.0.0.1
+```
+
+Verified on RTX 4080 Laptop (12,282 MiB, baseline desktop `2,297 MiB` used):
+- `llama-server` resident VRAM (model + `mmproj` + `q8_0` KV cache, 2 slots x 16k ctx, `--swa-full`): **`7,349–7,356 MiB`** total used (`~5,052 MiB` model delta, saving ~676 MiB vs PTQ `Q4_0` + `f16` KV cache).
+- Gate classifier warm latency: **`57.8 ms`** (`reasoning_content: null`).
+- `--jinja` tool calling (`roll`): **`589.9 ms`**, valid `tool_calls` JSON (`{"expr":"1d20"}`).
+- Vision `mmproj`: **`1,764.2 ms`** cold PNG encode, valid visual answer (`"Red square."`).
+
+### TTS Benchmark on RTX 4080 (Full Stack: Gemma 4 QAT + Parakeet-TDT + TTS)
+
+Kokoro user-space install in `$HOME/.venvs/s2s` without `sudo`:
+
+```bash
+unset SSL_CERT_FILE
+VIRTUAL_ENV="$HOME/.venvs/s2s" uv pip install "kokoro>=0.9.4" soundfile espeakng-loader phonemizer-fork
+VIRTUAL_ENV="$HOME/.venvs/s2s" uv pip install "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
+```
+
+Measured with `nvidia-smi` (total `12,282 MiB`, active Windows desktop baseline `1,814–2,306 MiB` used):
+
+| TTS Candidate | Steady / Active VRAM Used | Steady Free VRAM Headroom | Synthesis Speed / RTF | Notes |
+|---|---|---|---|---|
+| `Qwen3-TTS 0.6B BF16` (`ggml`) | `11,792 MiB` | `204 MiB` | ~4.3x real-time | Fails `>= 2.5 GiB` headroom |
+| `Qwen3-TTS 0.6B Q8_0` (`ggml`) | `10,933–11,191 MiB` | `805–1,063 MiB` | RTF `~0.23` (~4.3x real-time) | Fails `>= 2.5 GiB` headroom |
+| **`Kokoro-82M`** (`hexgrad/Kokoro-82M`, `bm_fable`, CUDA) | **`8,841–9,187 MiB`** (transient synthesis peak `9,447 MiB`) | **`2809–3155 MiB free`** (`2.74–3.08 GiB free`; transient synthesis dip `2549 MiB free`) | **RTF `~0.058`** (~17x real-time; 265–337 ms for 4.6–5.9s audio) | **Selected**: >= 2.5 GiB steady/active headroom (`2809–3155 MiB free`) + ~4x faster TTS |
+
+- `robot_profile/familiar/profile.md` updated to `voice = "bm_fable"`, `scripts/robot_connect.py` defaults `--voice bm_fable`, and `scripts/run_s2s.py` patches `KokoroTTSHandler` (`patch_kokoro_voice_guard`) to ignore invalid non-Kokoro Realtime session voice overrides such as `"Aiden"`.
+
+### Full-Stack End-to-End Turn Latency (`familiar-brain` + Gemma 4 QAT + `data/familiar.db`)
+
+Targets: addressed `median <= 1,500 ms`, `p95 <= 2,500 ms`; unaddressed turns do not stall.
+
+| Workload | `retrieval_ms` | `total_ms` (`median` / `p95`) | Status |
+|---|---|---|---|
+| Unaddressed table turns (`n=10`, post-follow-up window, Wave 1 Challenge) | `0 ms` | **`3.2 ms`** median / `7.1 ms` max | **PASS** (`0` stalls, `0` speech) |
+| Addressed `roll` turns (`n=7`, pre-M2-retrieval-fix baseline w/ 4x `sqlite-vec` scans over `3,183+` SRD 5.2.1 chunks) | `924–976 ms` warm (`1,539 ms` cold) | `2,087.8 ms` median / `4,449.8 ms` p95 | Superseded by M2 retrieval fix (below) |
+| **Addressed `roll` turns (post-M2-retrieval-fix + post-s2s `/api/warmup`, Gemma 4 QAT + Kokoro-82M + `audio-tap`, `n=8`)** | Warmed up ahead of Turn 1 | **`1,338.2 ms`** median / **`2,389.6 ms`** p95 (Turn 1: `1,902.2 ms`, first-token median: `1,011.8 ms`; `3,936–4,039 MiB` free VRAM) | **PASS** (`median <= 1,500 ms`, `p95 <= 2,500 ms`) |
+
+### STT Runaway Turn Fix & Stress Test
+
+- `scripts/run_s2s.py` wraps `speech-to-speech` to:
+  1. Cap `VADHandler._should_reopen_current_turn` at `S2S_MAX_TURN_AUDIO_S=30.0` and `S2S_MAX_TURN_REVISIONS=8`.
+  2. Commit `speculative_turns` on tool-only `EndOfResponse` in `LMOutputProcessor.process` so `IGNORE` (`idle_do_nothing`) turns do not remain uncommitted.
+  3. Set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` and `PHONEMIZER_ESPEAK_LIBRARY` / `ESPEAK_DATA_PATH` from `espeakng_loader`.
+- `scripts/start_all.sh` passes `--max_speech_ms 25000 --smart_turn_max_wait_ms 1200 --unanswered_reopen_ms 1500`.
+- **193.1s continuous speech stress test** (`38` x 5.25s 24 kHz PCM16 speech+pause cycles streamed to `ws://127.0.0.1:8765/v1/realtime` against live `Parakeet-TDT` + `Kokoro-82M` + `familiar-brain` + `Gemma 4 QAT`):
+  - `38` distinct turns (`turn_1`..`turn_38`), `max_rev = 1`, **`0` CUDA OOM errors**.
+  - VRAM stayed flat throughout: `9,169 MiB` (0s) -> `9,181 MiB` (30s) -> `9,231 MiB` (60s) -> `9,180 MiB` (90s) -> `9,183 MiB` (120s) -> `9,182 MiB` (150s) -> `9,183 MiB` (180s) -> `9,187 MiB` (193.1s, `2809 MiB free`).
+  - Clean shutdown verified (`LEFTOVER_PROCS: none`).
+

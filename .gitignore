@@ -4,6 +4,9 @@ __pycache__/
 data/
 config/persona.yaml
 .pytest_cache/
-familiar_brain/static/
 data/raw/
 config/players.txt
+
+reachy_familiar/build/
+reachy_familiar/dist/
+reachy_familiar/*.egg-info/
