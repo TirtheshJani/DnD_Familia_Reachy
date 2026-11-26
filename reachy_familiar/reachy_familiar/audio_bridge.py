@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import os
+import select
 import socket
 import struct
 import threading
@@ -142,13 +143,16 @@ class SimpleWebSocket:
         return out
 
     def recv_text(self, timeout: float = 1.0) -> str | None:
-        self.sock.settimeout(timeout)
+        # `timeout` only bounds the wait for a frame's first byte. The socket keeps the long
+        # timeout from __init__, so the mic thread's sendall and a frame split across slow
+        # packets are never cut off by this short poll.
         parts: list[bytes] = []
         while True:
-            try:
-                b0, b1 = self._take(2)
-            except socket.timeout:
-                return None
+            if not self._buf:
+                readable, _, _ = select.select([self.sock], [], [], timeout)
+                if not readable:
+                    return None
+            b0, b1 = self._take(2)
             n = b1 & 0x7F
             if n == 126:
                 (n,) = struct.unpack(">H", self._take(2))
@@ -170,13 +174,14 @@ class SimpleWebSocket:
                     return b"".join(parts).decode("utf-8", errors="replace")
 
     def close(self) -> None:
+        """Safe from any thread: shutdown wakes a peer thread blocked in sendall or recv."""
         try:
-            self._send_frame(0x8, struct.pack(">H", 1000))
-        except Exception:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
             pass
         try:
             self.sock.close()
-        except Exception:
+        except OSError:
             pass
 
 
@@ -246,6 +251,13 @@ class RealtimeAudioBridge:
         self._barge_in_muted = False
         self._reconnect_req = threading.Event()
         self._ws: SimpleWebSocket | None = None
+        self._mic_thread: threading.Thread | None = None
+
+    @property
+    def mic_alive(self) -> bool:
+        """True while the reachy-mic-tx sender thread runs."""
+        t = self._mic_thread
+        return t is not None and t.is_alive()
 
     def set_speaker_boost_db(self, boost_db: float) -> None:
         self.speaker_boost_db = max(0.0, min(15.0, float(boost_db)))
@@ -362,10 +374,13 @@ class RealtimeAudioBridge:
             daemon=True,
             name="reachy-mic-tx",
         )
+        self._mic_thread = mic_thread
         mic_thread.start()
         try:
             while not stop_event.is_set():
                 raw = ws.recv_text(timeout=0.5)
+                if not mic_thread.is_alive() and not stop_event.is_set():
+                    raise ConnectionError("mic sender thread exited")
                 if self.speaking and (time.monotonic() - self._last_audio_out_at) > 0.6:
                     self.speaking = False
                     self.creature.set_wobbling(False)
@@ -421,7 +436,8 @@ class RealtimeAudioBridge:
                     }
                 )
             except Exception as exc:
-                log.debug("mic loop ending: %s", exc)
+                log.warning("mic sender ending (%s); closing realtime WS to force a reconnect", exc)
+                ws.close()
                 break
 
     def _handle_server_event(self, ws: SimpleWebSocket, ev: dict[str, Any]) -> None:

@@ -1155,3 +1155,46 @@ exactly once (without this, Reconnect became a no-op in that case). The version 
 uses the daemon status when it describes the conversation app, so another app's version is never
 read as ours. New tests: `test_skipped_backend_config_still_restarts_backend_once`,
 `test_version_check_ignores_another_running_app`.
+
+## P25. Native mic thread survives send stalls and reconnects when it dies (2026-11-26)
+
+`SimpleWebSocket.recv_text` used to set a 0.5 s timeout on the socket that the
+`reachy-mic-tx` thread also uses for `sendall`. Any send stall over 0.5 s raised
+`TimeoutError`, `_mic_loop` logged it at DEBUG and exited, and `_run_session` kept
+answering pings with `connected=True`, so Rocky went deaf until someone pressed Reconnect.
+
+- **`recv_text(timeout)`** (`reachy_familiar/audio_bridge.py`) no longer touches the socket
+  timeout. When its buffer is empty it waits up to `timeout` with `select.select` for the
+  first byte and returns None if nothing is readable. Once a frame starts, the rest is read
+  with the 10 s timeout set once in `__init__`, so a frame split across slow packets no
+  longer tears the session down, and a stalled `sendall` waits up to 10 s instead of 0.5 s.
+- **`_run_session`** raises `ConnectionError("mic sender thread exited")` after any
+  `recv_text` when the mic thread is dead and `stop_event` is not set, so `run_loop`
+  reconnects (it logs that at WARNING, as before).
+- **`_mic_loop`** logs its ending exception at WARNING and calls `ws.close()` before
+  `break`.
+- **`SimpleWebSocket.close()`** is safe from any thread: `shutdown(SHUT_RDWR)` then
+  `close()`, each swallowing `OSError`.
+- **`RealtimeAudioBridge.mic_alive`** is True while the `reachy-mic-tx` thread runs (for the
+  Task 3 heartbeat).
+
+Deviations from the plan text:
+- `close()` no longer sends a WebSocket close frame. The plan says "shutdown then close";
+  sending a frame needs the send lock, which a mic thread stuck in `sendall` holds, so it
+  could block the caller (for example `request_reconnect` on the web thread) for up to 10 s.
+  The server now sees a plain TCP close instead of a 1000 close frame.
+- The `socket.timeout` catch around the first two header bytes in `recv_text` was removed:
+  after `select` reports data, a timeout there is a stall mid-frame and now propagates.
+- If the robot object has no `media.get_audio_sample`, `_mic_loop` returns at once and the
+  session now reconnects every 2 s. The real `ReachyMini` always has it.
+
+Not run against the real robot.
+
+New tests in `tests/test_audio_bridge_backpressure.py`:
+`test_mic_thread_survives_or_reconnects_after_send_stall` (fake server with
+`SO_RCVBUF=8192` that stops reading for 4 s), `test_partial_frame_does_not_tear_down_session`,
+`test_mic_send_failure_triggers_reconnect`. All three failed against the old code on Windows
+for the reasons the plan predicted (mic thread dead with no reconnect; `TimeoutError` from
+`_take`; `_run_session` still running) and pass on Windows (Python 3.11, uv) and in WSL
+Ubuntu-24.04. `tests/test_native_robot_and_profiles.py` and `tests/test_wake_and_reachy_app.py`
+pass on Windows.
