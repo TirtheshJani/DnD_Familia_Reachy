@@ -1148,3 +1148,10 @@ Not run against the real robot or app.
 New tests in `tests/test_robot_connect.py`: `test_warns_on_old_app_version`,
 `test_no_warning_on_current_version`, `test_configure_skips_backend_config_when_unchanged`,
 `test_apply_is_not_forced`.
+
+Review fixes (same day): when `backend.config` is skipped, `personalities.apply` is sent with
+`force: True`, so Reconnect on a stuck app that still reports connected restarts its backend
+exactly once (without this, Reconnect became a no-op in that case). The version check now only
+uses the daemon status when it describes the conversation app, so another app's version is never
+read as ours. New tests: `test_skipped_backend_config_still_restarts_backend_once`,
+`test_version_check_ignores_another_running_app`.

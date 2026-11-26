@@ -401,7 +401,8 @@ def configure(
     current_status: dict | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     current = current_status or {}
-    if current.get("backend_connected") and current.get("host") == host_ip and current.get("port") == port:
+    skipped = bool(current.get("backend_connected") and current.get("host") == host_ip and current.get("port") == port)
+    if skipped:
         # backend.config restarts the backend; skip it when it already points here and is connected.
         print(f"backend.config: already connected to {host_ip}:{port}, not reconfiguring")
     else:
@@ -428,7 +429,9 @@ def configure(
     result = call_when_loop_up(
         rpc,
         "personalities.apply",
-        {"name": profile, "persist": True},
+        # force restarts the backend once when backend.config was skipped, so Reconnect still
+        # unsticks an app that reports connected; never twice.
+        {"name": profile, "persist": True, **({"force": True} if skipped else {})},
         sleep=sleep,
     ) or {}
     print(f"personalities.apply: {result.get('status')} (startup: {result.get('startup')})")
@@ -687,7 +690,8 @@ def connect_and_configure(
             "error": str(exc),
         }
 
-    _check_app_version(status or {}, current)
+    # The daemon status describes whichever app was running before start-app; only trust it for ours.
+    _check_app_version(status or {}, current if ((current or {}).get("info") or {}).get("name") == APP else {})
     with rpc:
         effective_ip = host_ip or detect_host_ip(resolved_host, port=daemon_port)
         if dry_run_mode:

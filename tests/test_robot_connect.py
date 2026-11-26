@@ -438,6 +438,24 @@ def test_configure_skips_backend_config_when_unchanged() -> None:
     assert "personalities.apply" in methods
 
 
+def test_skipped_backend_config_still_restarts_backend_once() -> None:
+    # Reconnect on a stuck app that still reports connected must restart its backend exactly once.
+    fake_rpc = _FakeRpc(statuses=[{"backend_connected": True, "host": "192.0.2.50", "port": 8765}])
+    _connect(fake_rpc, _running_session({"name": robot_connect.APP, "version": "1.2.0"}))
+    methods = [m for m, _ in fake_rpc.calls]
+    applies = [p for m, p in fake_rpc.calls if m == "personalities.apply"]
+    assert "backend.config" not in methods
+    assert applies and applies[0].get("force") is True
+
+
+def test_version_check_ignores_another_running_app(caplog: pytest.LogCaptureFixture) -> None:
+    fake_rpc = _FakeRpc(statuses=[{"backend_connected": True}])
+    with caplog.at_level("WARNING"):
+        _connect(fake_rpc, _running_session({"name": "hand_tracker_v2", "version": "1.0.1"}))
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert not any("1.0.1" in m for m in warnings), warnings
+
+
 def test_apply_is_not_forced() -> None:
     fake_rpc = _FakeRpc(statuses=[{"backend_connected": True}])
     _connect(fake_rpc, _running_session({"name": robot_connect.APP, "version": "1.2.0"}))
