@@ -366,7 +366,7 @@ def pool_wedged_now(url: str, max_drain_s: float, timeout_s: float = POOL_POLL_I
         logger.warning("pool watchdog: /v1/pool returned bad JSON: %s", exc)
         return False
     if pool_is_wedged(pool, max_drain_s):
-        logger.warning("pool watchdog: s2s pool is wedged: %s", pool.get("units"))
+        logger.warning("pool watchdog: s2s pool is wedged: %s", pool.get("units") if isinstance(pool, dict) else pool)
         return True
     return False
 
@@ -380,7 +380,13 @@ def watch_pool(
 ) -> None:
     while True:
         time.sleep(interval_s)
-        if pool_wedged_now(url, max_drain_s, timeout_s=interval_s):
+        try:
+            wedged = pool_wedged_now(url, max_drain_s, timeout_s=interval_s)
+        except Exception:
+            # e.g. http.client.IncompleteRead; the watchdog must outlive any one bad poll.
+            logger.warning("pool watchdog: poll failed", exc_info=True)
+            continue
+        if wedged:
             logger.warning("pool watchdog: exiting with code %d so start_all.sh restarts s2s", WEDGED_EXIT_CODE)
             # os._exit skips logging's flush at exit, so flush the WARNING into s2s.log first.
             for handler in logging.getLogger().handlers:

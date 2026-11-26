@@ -215,3 +215,42 @@ def test_s2s_respawns_once(stack: dict):
     assert lines.count("start") == 2, lines
     # Stopping the stack also stops the s2s that the respawn loop started.
     assert "stopped" in lines, lines
+
+
+def test_stop_kills_s2s_even_when_the_respawn_loop_dies_first(stack: dict):
+    # The wake daemon's pkill TERMs the main shell and the respawn loop together; an s2s that
+    # ignores TERM must still be KILLed rather than orphaned on the GPU and the port.
+    import signal
+
+    starts = _live_stack(stack, 'trap "" TERM\necho $$ > "$STARTS.pid"\nexec sleep 30')
+    pid_file = Path(f"{starts}.pid")
+    proc = subprocess.Popen(
+        ["bash", "scripts/start_all.sh", "--skip-robot"],
+        cwd=stack["repo"], env=stack["env"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    s2s_pid = 0
+    try:
+        deadline = time.monotonic() + 8.0
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        s2s_pid = int(pid_file.read_text().strip())
+        time.sleep(1.0)
+        loop_pid = int(Path(f"/proc/{s2s_pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+        os.kill(loop_pid, signal.SIGTERM)
+        os.kill(proc.pid, signal.SIGTERM)
+        proc.wait(timeout=5)
+        deadline = time.monotonic() + 2.0
+        alive = True
+        while alive and time.monotonic() < deadline:
+            stat_path = Path(f"/proc/{s2s_pid}/stat")
+            alive = stat_path.exists() and stat_path.read_text().rsplit(")", 1)[1].split()[0] != "Z"
+            time.sleep(0.05)
+        assert not alive, "s2s survived the stop"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        if s2s_pid:
+            try:
+                os.kill(s2s_pid, signal.SIGKILL)
+            except OSError:
+                pass

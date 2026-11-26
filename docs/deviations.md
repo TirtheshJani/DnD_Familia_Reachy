@@ -1256,3 +1256,11 @@ New tests: `test_pool_is_wedged_flags_stuck_and_long_drain` and
 `tests/test_start_all_logs.py` (skipped on Windows, run in WSL with the brain venv; the
 second also checks that stopping the stack stops the respawned s2s);
 `test_stack_not_live_when_s2s_pool_stuck` in `tests/test_wake_and_reachy_app.py` (Windows).
+
+Review fixes (same day): the respawn loop writes its current s2s PID to `$RUN_DIR/s2s.pid` and
+`cleanup` always targets it, so the wake daemon's stop (which TERMs the main shell and the loop at
+the same moment) can no longer orphan an s2s that ignores TERM on the GPU and the port; before
+this, `pgrep -P` found nothing once the loop had exited. The pool watchdog now survives any one
+bad poll (`http.client` errors, a non-dict body, a non-numeric `draining_for_s`) with a WARNING
+instead of its thread dying silently. New tests: `test_stop_kills_s2s_even_when_the_respawn_loop_dies_first`
+(WSL), `test_pool_is_wedged_tolerates_odd_pool_bodies`, `test_pool_watchdog_keeps_running_after_a_poll_error`.

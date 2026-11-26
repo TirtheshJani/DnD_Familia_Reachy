@@ -418,3 +418,31 @@ def test_pool_watchdog_exits_70_when_wedged_but_not_while_s2s_loads() -> None:
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_pool_is_wedged_tolerates_odd_pool_bodies() -> None:
+    for odd in (None, [], "x", {"units": None}, {"units": ["x", None]},
+                {"units": [{"state": "draining", "draining_for_s": "soon"}]}):
+        assert run_s2s.pool_is_wedged(odd, 45.0) is False  # type: ignore[arg-type]
+
+
+def test_pool_watchdog_keeps_running_after_a_poll_error(monkeypatch, caplog) -> None:
+    calls: list[int] = []
+
+    def flaky(url: str, max_drain_s: float, timeout_s: float = 5.0) -> bool:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("IncompleteRead")
+        return True
+
+    codes: list[int] = []
+
+    def fake_exit(code: int) -> None:
+        codes.append(code)
+        raise SystemExit(code)
+
+    monkeypatch.setattr(run_s2s, "pool_wedged_now", flaky)
+    with caplog.at_level("WARNING"), pytest.raises(SystemExit):
+        run_s2s.watch_pool("http://127.0.0.1:9/v1/pool", max_drain_s=45.0, interval_s=0.01, exit_fn=fake_exit)
+    assert codes == [run_s2s.WEDGED_EXIT_CODE]
+    assert any("poll failed" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")

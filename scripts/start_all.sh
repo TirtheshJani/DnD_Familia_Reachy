@@ -105,6 +105,9 @@ cleanup() {
   # s2s runs under the respawn loop, so stop the loop's own child too: a slow s2s exit
   # must not outlive the loop and keep the GPU and the port.
   local targets="${PIDS[*]:-}"
+  # The loop records its current s2s, so a stop that TERMs the loop and this shell together
+  # still reaches an s2s that ignores TERM after the loop is gone.
+  targets="$targets $(cat "${RUN_DIR:-/nonexistent}/s2s.pid" 2>/dev/null || true)"
   if [ -n "${S2S_PID:-}" ] && command -v pgrep >/dev/null 2>&1; then
     targets="$targets $(pgrep -P "$S2S_PID" 2>/dev/null | tr '
 ' ' ' || true)"
@@ -230,9 +233,11 @@ s2s_loop() {
       "$S2S_VENV/bin/speech-to-speech" "${S2S_ARGS[@]}" >> "$RUN_DIR/s2s.log" 2>&1 &
     fi
     child=$!
+    echo "$child" > "$RUN_DIR/s2s.pid"
     rc=0
     wait "$child" || rc=$?
     child=""
+    rm -f "$RUN_DIR/s2s.pid"
     if [ "$S2S_RESPAWN" != "1" ]; then
       s2s_note "speech-to-speech exited with code $rc; not restarting (S2S_RESPAWN=$S2S_RESPAWN)"
       exit "$rc"

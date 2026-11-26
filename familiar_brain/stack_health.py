@@ -17,10 +17,18 @@ def pool_is_wedged(pool_json: dict[str, Any], max_drain_s: float) -> bool:
     draining_for_s) or stuck (its drain wait gave up and a handler may be dead, so
     the unit stays occupied forever and every new client gets session_limit_reached).
     """
-    for unit in pool_json.get("units") or []:
+    units = pool_json.get("units") if isinstance(pool_json, dict) else None
+    for unit in units if isinstance(units, list) else []:
+        if not isinstance(unit, dict):
+            continue
         state = unit.get("state")
         if state == "stuck":
             return True
-        if state == "draining" and float(unit.get("draining_for_s") or 0.0) >= max_drain_s:
-            return True
+        if state == "draining":
+            try:
+                drained = float(unit.get("draining_for_s") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if drained >= max_drain_s:
+                return True
     return False
