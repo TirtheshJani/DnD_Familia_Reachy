@@ -1174,3 +1174,44 @@ working, and a retry started a second robot connect. Native Reconnect now prefer
 `ROBOT_HOST` over the heartbeat's hardcoded `reachy-mini.local`, which WSL2 often cannot resolve.
 New test: `test_native_reconnect_prefers_launcher_robot_host`; `test_app_js_poll_cannot_wedge_and_good_poll_clears_banner`
 now pins the opt-in timeout.
+
+## P26. Speaker ID no longer leaves Rocky ignoring the table (2026-11-26)
+
+The tap kept the last matched speaker, usually the DM, for up to 15 s. Real clients never
+send `input_audio_buffer.commit`, so only streaming matches ran, and those never cleared the
+label on a miss. Whoever spoke next was gated as the DM. Fixed in four places:
+
+- **Label expires on a miss.** The streaming match in `_tap_worker` now uses
+  `clear_on_miss=True`, so a non-match clears the role instead of keeping the old one.
+  `config/brain.toml` sets `speakers.max_age_s = 3.0` (read by `_query_tap_current` in
+  `app.py`), so a stale label also ages out in 3 s instead of 15 s.
+- **Worker survives errors.** `_tap_worker` used to die silently on any exception, which
+  ended speaker ID for the night. The per-batch work moved into `_drain_tap_queue`; the loop
+  catches `Exception`, logs at WARNING with the traceback, sleeps 0.1 s so a repeating error
+  cannot spin hot, and carries on. `asyncio.CancelledError` is not caught, so shutdown still
+  cancels the worker cleanly.
+- **GA input rate.** `_inspect_client_text` now also reads
+  `session.audio.input.format.rate` from a GA `session.update`. Before, a 24 kHz GA client
+  was decoded as 16 kHz.
+- **Tap and brain read the same file.** `_notify_tap_reload` always sends `store_path`
+  (the active campaign's `speakers.json`), so enroll, delete and clear no longer leave the
+  tap on `data/speakers.json`. It now returns whether the tap answered and logs a WARNING
+  when it does not. New `_sync_tap_store` (exposed as `app.extensions["sync_tap_store"]`,
+  called from `main()`) sends the same reload at startup from a daemon thread: up to 30
+  attempts, 0.3 s request timeout, 1 s apart, stopping as soon as the tap answers, and one
+  WARNING if it gives up. It never blocks brain startup or a request thread.
+
+Deviations from the plan:
+
+- The startup retry is called from `main()`, not from `create_app`, so the many test apps
+  built by `create_app` do not start background threads that post to test taps.
+- Two extra tests pin the startup retry (stops once the tap answers; warns when it gives up).
+
+Not run against the real robot. The e2e suites that drive the tap (`tests/e2e/`) were not
+run here.
+
+New tests in `tests/test_speaker_id.py`: `test_tap_role_clears_on_streaming_miss`,
+`test_tap_worker_survives_exception`, `test_tap_reads_ga_input_rate`,
+`test_notify_tap_reload_always_sends_store_path`,
+`test_tap_store_sync_retries_in_background_until_tap_answers` and
+`test_tap_store_sync_gives_up_with_warning`.

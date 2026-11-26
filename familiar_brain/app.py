@@ -355,19 +355,49 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
             pass
         return None, None
 
-    def _notify_tap_reload(*, store_path: Path | None = None) -> None:
+    def _notify_tap_reload(*, store_path: Path | None = None, quiet: bool = False) -> bool:
+        """Tell the tap to reload. Always names the file, so the tap never falls back to
+        data/speakers.json while the brain enrolls into the active campaign's store."""
         if not cfg.speakers.enabled:
-            return
+            return False
+        path = store_path if store_path is not None else speaker_registry.store_path
         try:
-            payload = {"store_path": str(store_path)} if store_path is not None else {}
-            tap_http.post(
+            r = tap_http.post(
                 f"{cfg.speakers.tap_url.rstrip('/')}/_tap/reload",
-                json=payload,
+                json={"store_path": str(path)},
                 headers={"Connection": "close"},
                 timeout=0.3,
             )
-        except Exception:
-            pass
+            if r.ok:
+                return True
+            detail = f"HTTP {r.status_code}"
+        except Exception as exc:
+            detail = str(exc)
+        if not quiet:
+            app.logger.warning("tap /_tap/reload failed (%s); tap may hold stale speakers", detail)
+        return False
+
+    def _sync_tap_store(*, attempts: int = 30, interval_s: float = 1.0) -> threading.Thread | None:
+        """At startup the tap may not be up yet. Retry in a daemon thread so brain startup and
+        request threads never wait on it; stop as soon as the tap answers."""
+        if not cfg.speakers.enabled:
+            return None
+
+        def _run() -> None:
+            for _ in range(attempts):
+                if _notify_tap_reload(quiet=True):
+                    return
+                time.sleep(interval_s)
+            app.logger.warning(
+                "tap never answered /_tap/reload after %d attempts; it may read the wrong speakers.json",
+                attempts,
+            )
+
+        t = threading.Thread(target=_run, daemon=True, name="tap-store-sync")
+        t.start()
+        return t
+
+    app.extensions["sync_tap_store"] = _sync_tap_store
 
     def _speaker_status() -> dict:
         return {
@@ -1490,6 +1520,9 @@ def main() -> None:
     cfg_path = sys.argv[1] if len(sys.argv) > 1 else "config/brain.toml"
     app = create_app(cfg_path)
     cfg = load_config(cfg_path)
+    sync_tap = app.extensions.get("sync_tap_store")
+    if callable(sync_tap):
+        sync_tap()
     warmup_fn = app.extensions.get("warmup")
     if callable(warmup_fn):
         warmup_fn(warm_llm=(os.environ.get("FAMILIAR_WARMUP_LLM") == "1"))
