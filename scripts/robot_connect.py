@@ -35,7 +35,9 @@ import base64
 import hashlib
 import ipaddress
 import json
+import logging
 import os
+import re
 import socket
 import struct
 import sys
@@ -51,6 +53,11 @@ PROFILE_DIR = Path(__file__).resolve().parent.parent / "robot_profile" / PROFILE
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 DEFAULT_ROBOT_CANDIDATES = ("reachy-mini.local", "10.0.0.100")
 TRANSIENT_DAEMON_STATES = {"starting", "initializing", "stopping", "restarting", "pending"}
+# First Pollen release that drops a dead realtime socket when a mic send stalls (5 s timeout);
+# 1.0.1 and 1.1.x can freeze their record loop for minutes. Release notes, v1.2.0.
+MIN_APP_VERSION = (1, 2, 0)
+
+log = logging.getLogger("robot_connect")
 
 
 class RpcError(Exception):
@@ -236,6 +243,27 @@ def resolve_robot_host(
     raise ConnectionError(f"Could not resolve any robot host from {ordered}")
 
 
+def parse_app_version(listing: dict) -> tuple[int, int, int] | None:
+    """The app version in a daemon app listing or status dict, or None if absent or unreadable."""
+    if not isinstance(listing, dict):
+        return None
+    info = listing.get("info")
+    raw = listing.get("version") or (info.get("version") if isinstance(info, dict) else None)
+    match = re.match(r"\s*v?(\d+)\.(\d+)\.(\d+)", str(raw or ""))
+    return (int(match[1]), int(match[2]), int(match[3])) if match else None
+
+
+def _check_app_version(*sources: dict) -> None:
+    """Warn, never raise, when the robot app is older than MIN_APP_VERSION or its version is unknown."""
+    version = next((v for v in map(parse_app_version, sources) if v), None)
+    want = ".".join(map(str, MIN_APP_VERSION))
+    if version is None:
+        log.warning("could not read the %s version; it needs %s or newer for the 5 s mic send timeout", APP, want)
+    elif version < MIN_APP_VERSION:
+        log.warning("%s %s is older than %s: it has no mic send timeout, so a dead network path can freeze "
+                    "its mic for minutes. Upgrade the app on the robot.", APP, ".".join(map(str, version)), want)
+
+
 def detect_host_ip(robot: str, port: int = 8000) -> str:
     """The local address the OS would use to reach the robot. No packet is sent."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -370,9 +398,15 @@ def configure(
     *,
     verify_timeout_s: float = 30.0,
     sleep: Callable[[float], None] = time.sleep,
+    current_status: dict | None = None,
 ) -> tuple[dict[str, Any], str | None]:
-    result = rpc.call("backend.config", {"hf_mode": "local", "hf_host": host_ip, "hf_port": port}) or {}
-    print(f"backend.config local {host_ip}:{port}: {result.get('message')}")
+    current = current_status or {}
+    if current.get("backend_connected") and current.get("host") == host_ip and current.get("port") == port:
+        # backend.config restarts the backend; skip it when it already points here and is connected.
+        print(f"backend.config: already connected to {host_ip}:{port}, not reconfiguring")
+    else:
+        result = rpc.call("backend.config", {"hf_mode": "local", "hf_host": host_ip, "hf_port": port}) or {}
+        print(f"backend.config local {host_ip}:{port}: {result.get('message')}")
 
     voices = rpc.call("voices.list") or []
     voice = next((v for v in voices if v.lower() == wanted_voice.lower()), None)
@@ -394,7 +428,7 @@ def configure(
     result = call_when_loop_up(
         rpc,
         "personalities.apply",
-        {"name": profile, "persist": True, "force": True},
+        {"name": profile, "persist": True},
         sleep=sleep,
     ) or {}
     print(f"personalities.apply: {result.get('status')} (startup: {result.get('startup')})")
@@ -653,6 +687,7 @@ def connect_and_configure(
             "error": str(exc),
         }
 
+    _check_app_version(status or {}, current)
     with rpc:
         effective_ip = host_ip or detect_host_ip(resolved_host, port=daemon_port)
         if dry_run_mode:
@@ -680,6 +715,7 @@ def connect_and_configure(
                 voice,
                 verify_timeout_s=verify_timeout_s,
                 sleep=sleep,
+                current_status=status,
             )
             show("conversation.status", final_status)
         except (RpcError, TimeoutError, ConnectionError, OSError) as exc:
@@ -727,6 +763,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true",
                     help="connect and print the app's current state without changing anything")
     args = ap.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     robot_arg = args.robot.strip()
     if not robot_arg:

@@ -1113,3 +1113,38 @@ installed speech_to_speech 1.0.0 `Chat` in WSL only.
 
 New test: `test_unanswered_gesture_call_does_not_block_next_turn` in
 `tests/test_run_s2s.py` (skipped on Windows, run in WSL against the real s2s).
+
+## P24. robot_connect warns on an old app and avoids a double backend restart (2026-11-26)
+
+Plan Task 9 (findings cause 6). Pollen's conversation app before 1.2.0 has no send timeout
+on mic frames, so a dead network path can freeze its record loop for minutes. The robot
+upgrade is a runbook step (Task 10); this change makes an old app visible at connect time.
+
+- **`parse_app_version(listing)`** and **`MIN_APP_VERSION = (1, 2, 0)`** in
+  `scripts/robot_connect.py`. The version is read from `version` or `info.version` in the
+  `/rpc` `conversation.status` reply, then the daemon's `current-app-status`. Older than
+  1.2.0 logs a WARNING naming the minimum; a missing or unreadable version logs a WARNING
+  too. Neither stops the connect flow. `main()` now sets up logging so the WARNING lands in
+  `robot_connect.log` with its level.
+- **`backend.config` is skipped** when `conversation.status` already reports the same host
+  and port and `backend_connected` is True.
+- **`personalities.apply` no longer passes `force: True`**, so applying the profile does not
+  restart the backend a second time.
+
+Deviations from the plan text:
+- MIN_APP_VERSION was confirmed only from the v1.2.0 release note ("Drop a dead realtime
+  socket when an audio send stalls"); the constant name `AUDIO_SEND_TIMEOUT_S` was not
+  checked in Pollen's source, and pages of releases older than v0.6.2 were not read.
+- The skip of `backend.config` also requires `backend_connected` True. The plan says skip
+  when host and port are unchanged; skipping while disconnected would leave a stuck app
+  with no reconnect, and re-running robot_connect is how TJ recovers it.
+- The field names for the app version (`version`, `info.version`) and for the current
+  backend target in `conversation.status` (`host`, `port`, as `tests/e2e/fakes.py` models
+  it) were not checked against the real app. If the real reply lacks them, the result is
+  a "could not read" WARNING and `backend.config` is sent as before, never a crash.
+
+Not run against the real robot or app.
+
+New tests in `tests/test_robot_connect.py`: `test_warns_on_old_app_version`,
+`test_no_warning_on_current_version`, `test_configure_skips_backend_config_when_unchanged`,
+`test_apply_is_not_forced`.

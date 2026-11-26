@@ -389,3 +389,58 @@ def test_dry_run_does_not_start_stopped_app() -> None:
     )
     assert res["ok"] is False
     assert "dry-run" in (res["error"] or "")
+
+
+def _running_session(info: dict) -> SimpleNamespace:
+    return SimpleNamespace(
+        get=lambda u, timeout=5.0: _FakeResp(200, {"info": info, "state": "running"}),
+        post=lambda u, timeout=30.0: _FakeResp(200, {}),
+    )
+
+
+def _connect(fake_rpc: _FakeRpc, session: SimpleNamespace) -> dict:
+    return robot_connect.connect_and_configure(
+        "192.0.2.10",
+        host_ip="192.0.2.50",
+        port=8765,
+        voice="Aiden",
+        session=session,
+        rpc_factory=lambda h, p, timeout=10.0: fake_rpc,
+        sleep=lambda _s: None,
+    )
+
+
+def test_warns_on_old_app_version(caplog: pytest.LogCaptureFixture) -> None:
+    fake_rpc = _FakeRpc(statuses=[{"backend_connected": True}])
+    with caplog.at_level("WARNING"):
+        res = _connect(fake_rpc, _running_session({"name": robot_connect.APP, "version": "1.0.1"}))
+    assert res["ok"] is True
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("1.0.1" in m and "1.2.0" in m for m in warnings), warnings
+
+
+def test_no_warning_on_current_version(caplog: pytest.LogCaptureFixture) -> None:
+    assert robot_connect.parse_app_version({"info": {"version": "1.2.0"}}) == (1, 2, 0)
+    assert robot_connect.parse_app_version({"info": None}) is None
+    fake_rpc = _FakeRpc(statuses=[{"backend_connected": True}])
+    with caplog.at_level("WARNING"):
+        res = _connect(fake_rpc, _running_session({"name": robot_connect.APP, "version": "1.2.0"}))
+    assert res["ok"] is True
+    assert [r for r in caplog.records if r.levelno >= 30] == []
+
+
+def test_configure_skips_backend_config_when_unchanged() -> None:
+    fake_rpc = _FakeRpc(statuses=[{"backend_connected": True, "host": "192.0.2.50", "port": 8765}])
+    res = _connect(fake_rpc, _running_session({"name": robot_connect.APP, "version": "1.2.0"}))
+    assert res["ok"] is True
+    methods = [m for m, _ in fake_rpc.calls]
+    assert "backend.config" not in methods
+    assert "personalities.apply" in methods
+
+
+def test_apply_is_not_forced() -> None:
+    fake_rpc = _FakeRpc(statuses=[{"backend_connected": True}])
+    _connect(fake_rpc, _running_session({"name": robot_connect.APP, "version": "1.2.0"}))
+    applies = [p for m, p in fake_rpc.calls if m == "personalities.apply"]
+    assert applies and all("force" not in p for p in applies)
+    assert applies[0]["persist"] is True
