@@ -18,7 +18,8 @@ log = logging.getLogger("familiar.upstream")
 
 
 class Upstream:
-    def __init__(self, *, base_url: str, generate_slot: int, brain_tool_names: set[str], timeout_s: float = 60.0,
+    def __init__(self, *, base_url: str, generate_slot: int, brain_tool_names: set[str],
+                 timeout_s: tuple[float, float] = (5, 15),
                  reasoning_effort: str | None = "none"):
         self.base_url = base_url.rstrip("/")
         self.generate_slot = generate_slot
@@ -75,7 +76,7 @@ class Upstream:
         tools, so no brain-side tool round trip is attempted on this path.
         """
         body = self._with_defaults(copy.deepcopy(req), stream=False)
-        r = self._session().post(f"{self.base_url}/responses", json=body, timeout=self.timeout_s)
+        r = self._session().post(f"{self.base_url}/responses", json=body, timeout=(self.timeout_s[0], 60))
         r.raise_for_status()
         return r.json()
 

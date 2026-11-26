@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import socket
 import sys
 import threading
@@ -15,6 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT / "reachy_familiar") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "reachy_familiar"))
 
+import familiar_brain.wake_daemon as wake_daemon  # noqa: E402
 from familiar_brain.wake_daemon import DISCOVER_MAGIC, StackManager, WakeDaemonServer  # noqa: E402
 from reachy_familiar.audio_bridge import apply_speaker_boost  # noqa: E402
 from reachy_familiar.creature import ALL_VALID_MOVES, CreatureController, EMOTION_LIBRARY, resolve_emotion_move  # noqa: E402
@@ -103,6 +105,77 @@ def test_wake_daemon_http_and_udp_discovery(tmp_path: Path):
         assert stopped_called == [True]
     finally:
         srv.stop()
+
+
+def test_wake_daemon_logs_to_file(tmp_path: Path):
+    """Under pythonw.exe there is no stderr, so the daemon's own log must go to a file."""
+    mgr = StackManager(repo_root=tmp_path, probe_fn=lambda: False)
+    root = logging.getLogger()
+    old_level = root.level
+    handler = wake_daemon.setup_logging(mgr.repo_root)
+    try:
+        wake_daemon.log.info("wake daemon file log check")
+        handler.flush()
+        text = (tmp_path / "data" / "logs" / "wake_daemon.log").read_text(encoding="utf-8")
+        assert "wake daemon file log check" in text
+        assert handler.maxBytes == 5 * 1024 * 1024 and handler.backupCount == 3
+    finally:
+        root.removeHandler(handler)
+        handler.close()
+        root.setLevel(old_level)
+
+
+def test_wake_daemon_logs_stack_output_to_run_dir_stack_log(tmp_path: Path, monkeypatch):
+    """The daemon names the run dir, hands it to start_all.sh as RUN_DIR, and appends the
+    stack's stdout to that run dir's stack.log."""
+    calls: list[list[str]] = []
+    procs: list[_FakeProc] = []
+
+    def fake_popen(cmd, **kwargs):
+        calls.append(cmd)
+        proc = _FakeProc(["familiar-brain ready", "Session auto-started"])
+        procs.append(proc)
+        return proc
+
+    monkeypatch.setattr(wake_daemon.subprocess, "Popen", fake_popen)
+    mgr = StackManager(repo_root=tmp_path, probe_fn=lambda: False, stop_fn=lambda proc: proc.terminate())
+    mgr.wake()
+    try:
+        runs = list((tmp_path / "data" / "logs").iterdir())
+        assert len(runs) == 1
+        assert f"RUN_DIR='data/logs/{runs[0].name}' ./scripts/start_all.sh" in calls[0][-1]
+        stack_log = runs[0] / "stack.log"
+        deadline = time.monotonic() + 3
+        while "Session auto-started" not in (stack_log.read_text(encoding="utf-8") if stack_log.exists() else ""):
+            assert time.monotonic() < deadline, "stack.log never got the stack output"
+            time.sleep(0.05)
+        assert "familiar-brain ready" in stack_log.read_text(encoding="utf-8")
+    finally:
+        mgr.sleep()
+
+
+def test_wake_daemon_watcher_keeps_the_stack_log_of_its_own_run(tmp_path: Path, monkeypatch):
+    """A quick sleep/wake must not point the previous run's watcher at the next run's stack.log."""
+    monkeypatch.setattr(wake_daemon.subprocess, "Popen", lambda cmd, **kw: _FakeProc(["first run line"]))
+    started: list[threading.Thread] = []
+    real_start = threading.Thread.start
+
+    class _HeldThread(threading.Thread):
+        def start(self) -> None:  # held until the next run's path is set
+            started.append(self)
+
+    monkeypatch.setattr(wake_daemon.threading, "Thread", _HeldThread)
+    mgr = StackManager(repo_root=tmp_path, probe_fn=lambda: False, stop_fn=lambda proc: proc.terminate())
+    mgr.wake()
+    first_log = mgr._stack_log_path
+    mgr._stack_log_path = tmp_path / "next_run_stack.log"
+    real_start(started[0])
+    started[0].join(timeout=3)
+    try:
+        assert "first run line" in first_log.read_text(encoding="utf-8")
+        assert not (tmp_path / "next_run_stack.log").exists()
+    finally:
+        mgr.sleep()
 
 
 def test_creature_controller_emotions_sleep_and_ambient_sway():
@@ -232,3 +305,34 @@ def test_speaker_boost_applies_gain_with_soft_limit():
     loud = np.array([0.9, -0.95, 1.0], dtype=np.float32)
     limited = apply_speaker_boost(loud, 15.0)
     assert float(np.max(np.abs(limited))) <= 1.0
+
+
+def test_stack_not_live_when_s2s_pool_stuck(tmp_path: Path):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    pool = {"size": 1, "in_use": 1, "units": [{"index": 0, "state": "stuck", "session_id": "s",
+                                               "draining_for_s": 200.0, "stuck_for_s": 20.0}]}
+
+    class FakeStack(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            body = json.dumps(pool if self.path == "/v1/pool" else {"ok": True}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FakeStack)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        mgr = StackManager(repo_root=tmp_path, brain_port=port, ws_port=port)
+        assert mgr._is_stack_live() is False
+        pool["units"] = [{"index": 0, "state": "idle", "session_id": None}]
+        assert mgr._is_stack_live() is True
+    finally:
+        server.shutdown()
+        server.server_close()

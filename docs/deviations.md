@@ -982,3 +982,535 @@ and `test_a_session_summary_fact_is_still_retrievable_once_a_campaign_memory_exi
 `test_it_is_indexed_in_sessions_under_its_own_source_at_the_top_weight` is renamed
 `..._just_above_a_summary` and checks 1.6. `tests/fakes/llm_server.py` can now script
 `finish_reason`.
+
+## P20. Every launch keeps its logs (2026-11-26)
+
+The run on 2026-11-25 left four empty logs: `start_all.sh` truncated `data/*.log` with `>`
+on every launch, and the wake daemon's own log went to a `pythonw.exe` stderr nobody sees.
+
+- **Per-run log dirs** (`scripts/start_all.sh`). Each launch makes
+  `data/logs/<YYYYmmdd-HHMMSS>/` and appends `llama.log`, `brain.log`, `s2s.log`,
+  `audio_tap.log` and `robot_connect.log` there with `>>`. `RUN_DIR` is exported to the
+  children. The old `data/<name>.log` paths are hard links (`ln -f`) to the newest run's
+  files, so the docs, the `wait_for` tails, Windows editors and `familiar-brain gate-report`
+  run from the Windows checkout still work. `data/logs/latest` is a symlink to the newest
+  run dir and works inside WSL only: on the `/mnt/c` checkout DrvFs stores `ln -s` links as
+  WSL symlinks that Windows cannot open. All five files are created up front before
+  linking. Only the newest 20 run dirs are kept; a run dir that cannot be deleted (for
+  example a file held open on Windows) prints a warning and the launch carries on.
+  `robot_connect.py` used to print to the terminal only; it now runs with `python -u`
+  through `tee -a` so the terminal still shows each line as it happens.
+- **Timestamps only where `ts` exists.** llama, brain and audio-tap are launched through a
+  small `log_to` helper that `exec`s the child, so `$!` is still the child's own PID and the
+  cleanup still kills it. When `ts` (moreutils) is installed their lines are stamped through
+  a process substitution; s2s stamps its own lines and is not piped. `ts` is not installed
+  in TJ's WSL, so on the laptop no prefix is added today.
+- **Wake daemon log file** (`familiar_brain/wake_daemon.py`). New `setup_logging(repo_root)`
+  adds a `RotatingFileHandler` at `data/logs/wake_daemon.log` (5 MB x 3); `main()` calls it
+  after `basicConfig`. The `[stack] ...` lines it already logged now land there too.
+- **How `stack.log` gets its path.** The daemon runs on Windows and starts the stack with
+  `wsl -d <distro> -e bash -lc "... ./scripts/start_all.sh ..."`, so it cannot read a
+  `RUN_DIR` chosen inside WSL afterwards. Instead `_default_spawn` picks the run name
+  itself, creates `<repo>/data/logs/<name>/` from Windows, and passes
+  `RUN_DIR='data/logs/<name>'` in the bash command; `start_all.sh` uses a `RUN_DIR` it is
+  given (`RUN_DIR="${RUN_DIR:-data/logs/$(date ...)}"`). The boot watcher appends every
+  stdout line it reads to that dir's `stack.log`. `wake()` reads that path under its lock
+  and hands it to the watcher thread, so a quick sleep and wake cannot send one run's
+  output to the next run's `stack.log`. A failure to open, write or close it logs a
+  WARNING and the watcher carries on. A spawn failure in `wake()` now also logs a WARNING;
+  it set the error state silently before.
+
+Deviation from the plan text: the plan says `ln -sfn` for the legacy `data/<name>.log`
+links. Those symlinks broke reading the logs from Windows (PowerShell `Get-Content` failed
+and Windows Python raised `OSError: [WinError 1920]`, which crashed `gate-report`), so they
+are hard links instead. This was checked by running `start_all.sh` twice with stubs from a
+copy under `/mnt/c`, then reading `data\brain.log` and running `gate-report` on it from
+Windows. Only `latest` is still made with `ln -sfn`.
+
+Second deviation: the plan says to append the stack's stdout to
+`$RUN_DIR/stack.log` from `wake_daemon.py`; since `RUN_DIR` is not visible to Windows,
+the daemon chooses it and hands it to `start_all.sh`, as above. Stack runs started by hand
+from a terminal have no `stack.log` (their output is on the terminal). Five tests were
+added beyond the plan's two: 20-dir pruning, a run dir that cannot be pruned, a given
+`RUN_DIR`, `ts`, and the watcher keeping its own run's `stack.log`.
+
+`start_all.sh` was checked by running it in WSL with stub binaries (stub `curl` so no real
+port is probed): twice in a row for two run dirs, once with a stub `ts` and long-running
+stubs to confirm every child is still killed on TERM with no orphans, and once through to
+`robot_connect.py`. Not run on the real robot or with the real llama, brain or s2s; the
+wake daemon was not run under `pythonw.exe`.
+
+Known side effect, not changed here (it needs a change outside this task's files): the
+existing e2e tests in
+`tests/e2e/test_tier1_happy_paths.py` run `scripts/start_all.sh` with stubs inside the repo
+itself, so one full `uv run pytest` adds about 10 run dirs under `data/logs/` (before this
+change it truncated `data/*.log` instead). Two full suite runs after a session would push
+that session's run dir out of the newest 20. Copy a session's run dir somewhere safe
+before running the full suite in the main checkout.
+
+New tests: `test_start_all_keeps_previous_run_logs`,
+`test_start_all_prunes_all_but_the_newest_20_run_dirs`,
+`test_start_all_still_launches_when_an_old_run_dir_cannot_be_pruned`,
+`test_start_all_uses_the_run_dir_it_is_given` and
+`test_start_all_timestamps_child_lines_when_ts_is_installed` in
+`tests/test_start_all_logs.py` (skipped on Windows, run in WSL);
+`test_wake_daemon_logs_to_file` and
+`test_wake_daemon_logs_stack_output_to_run_dir_stack_log` and
+`test_wake_daemon_watcher_keeps_the_stack_log_of_its_own_run` in
+`tests/test_wake_and_reachy_app.py`.
+
+## P21. An unanswered gesture call no longer blocks s2s (2026-11-26)
+
+speech-to-speech 1.0.0 refuses every LLM request and every `response.create` while any
+`function_call` in the chat lacks its `function_call_output`, with no timeout. The brain
+sends a gesture preface or `idle_do_nothing` on nearly every turn, and the app drops its
+tool result when `response.done` takes over 30 s, so one slow reply could leave a call
+pending for good: transcription kept arriving and nothing answered until reconnect.
+
+- **`patch_chat_pending_tools(Chat)`** (`scripts/run_s2s.py`, applied from
+  `apply_s2s_patches()`). The patched `Chat.has_pending_tool_calls()` holds `self._lock`,
+  as the original does, and returns True only for a pending call whose name is not in the
+  new `ROBOT_GESTURE_TOOLS` (`play_emotion`, `stop_emotion`, `head_tracking`, `move_head`,
+  `idle_do_nothing`). A pending `camera` call still blocks, because its output is the frame
+  the next reply needs. Every gate in the installed s2s calls this one method:
+  `base_openai_compatible_language_model.py` lines 943 and 1069, `language_model.py` line
+  605, and `api/openai_realtime/handlers/response.py` lines 180 (tool follow-up prefetch)
+  and 753 (`response.create`, on a copy of the chat, which is the same class). The late
+  output for a gesture still goes through the unchanged `append_tool_output`, which
+  re-injects the call when it is no longer in the buffer.
+- **Tool names checked.** The set matches the brain's `GESTURE_TOOLS` in
+  `familiar_brain/app.py`, the names the brain emits (`responses_api.IDLE_TOOL`,
+  `motion.py`, `attention.py`), and the robot's `default_tools` in
+  `robot_profile/familiar/profile.md` and `reachy_familiar/audio_bridge.py`.
+
+Deviation from the plan text: the plan also says to answer non-addressed turns at
+`app.py` with `empty_response_events()` instead of `idle_do_nothing`, with a test
+`test_ignored_turn_sends_no_tool_call`. That item was skipped, because it is wrong as
+written. In s2s 1.0.0 a turn is committed only by TTS output or by an assistant output
+part (text or tool call): `on_assistant_output` in `handlers/response.py` and the existing
+`patch_lm_output_processor`. An empty response commits nothing, so every ignored turn
+would stay open and the next utterance within `unanswered_reopen_ms` would be merged into
+it as a revision, which is the bug `idle_do_nothing` and point 2 of the `run_s2s.py` docstring
+exist to prevent. Checked against the real s2s in WSL: after `apply_s2s_patches()` an
+`idle_do_nothing` response left `is_committed` True and an empty response left it False.
+With the s2s patch above the pending `idle_do_nothing` no longer blocks anything, so the
+app change is not needed for the stall. It would also have broken about 30 existing tests
+that expect `idle_do_nothing` on ignored turns. `app.py` and `tests/test_app_integration.py`
+are unchanged.
+
+Known edge cases left as they are (review, not fixed tonight). s2s still drops an unpaired
+ordered gesture call, and everything after it up to the next user message, when it builds
+the next request (`Chat._drop_unpaired_ordered_turns_locked`). So if a gesture result never
+arrives, that one reply is missing from the history the brain sees. And if the app sends a
+camera result and `response.create` while the preface gesture's result is still pending,
+the camera call is stripped too and the frame is lost for that turn. Both are far milder
+than the permanent silence they replace; watch for the camera case in Task 10. Gesture
+calls that never get an output also stay in `Chat._pending_tool_calls` for the whole
+session, a few small objects per dropped result.
+
+Not run on the real robot or with the real app; the patch was exercised against the
+installed speech_to_speech 1.0.0 `Chat` in WSL only.
+
+New test: `test_unanswered_gesture_call_does_not_block_next_turn` in
+`tests/test_run_s2s.py` (skipped on Windows, run in WSL against the real s2s).
+
+## P22. Bounded LLM turns and no dropped long speech (2026-11-26)
+
+One brain request could hold the only s2s LLM thread for about a minute: the OpenAI SDK
+retried a timed-out request twice, each retry cost another 20 s httpx read timeout, the
+brain sent no headers until llama's first token, and nothing bounded a slow stream. And
+`--max_speech_ms 25000` made s2s throw away any segment over 25 s with no transcript.
+
+- **`patch_responses_request(ResponsesApiModelHandler)`** (`scripts/run_s2s.py`, applied
+  from `apply_s2s_patches()`). `--llm_backend responses-api` builds
+  `speech_to_speech.LLM.responses_api_language_model.ResponsesApiModelHandler`, and its
+  `_request` and `_iter_stream_events` are the real names in 1.0.0. `_generate` reaches
+  them through `self`, both directly and through the prefetch worker, so patching the class
+  takes effect. The wrapped `_request` swaps `self.client` for
+  `client.with_options(max_retries=0)` once; checked against the real SDK, a 500 is now
+  sent once instead of three times. The wrapped `_iter_stream_events` starts a
+  `threading.Timer` for `FAMILIAR_LLM_DEADLINE_S` (default 20) that logs a WARNING and
+  calls `api_response.close()`, and the iterator then raises `httpx.ReadTimeout`. That
+  lands in the existing `except httpx.ReadTimeout` in `_generate`, so the turn ends there:
+  s2s speaks its fallback line if nothing had been said yet, and always sends
+  `EndOfResponse`. The prefetch path passes the exception through its queue to the same
+  handler. The timer is cancelled in `finally`, and a lock plus a finished flag stop it
+  closing a stream the iterator has already let go of. In the microseconds between a stream
+  ending on its own and that `finally`, a timer firing at that exact moment would still
+  report a turn that ran the full deadline as a timeout.
+- **Brain** (`familiar_brain/app.py`). The addressed `gen()` yields the SSE comment
+  `: ok` first, so headers and first bytes go out before any upstream work. Checked with
+  the real openai SDK in WSL: a stream that starts with `: ok` parses to the same events.
+- **Upstream** (`familiar_brain/upstream.py`). The default `timeout_s` is now `(5, 15)`:
+  5 s to connect, 15 s between reads, for both `stream` and `complete`. `app.py` does not
+  pass its own value.
+- **`scripts/start_all.sh`**. `--max_speech_ms 25000` removed, so s2s leaves it unset,
+  which means no limit.
+
+Margin on the 20 s deadline. Every s2s queue between the LLM and TTS is an unbounded
+`Queue()` (`s2s_pipeline.py`), so the stream is read as fast as llama generates; TTS
+playback time does not count. The measured addressed turn is 620 ms in total with tool
+round trips under a second (E2 above, docs/versions.md), for a reply capped at two
+sentences. Thinking mode allows six sentences, about 3 to 4 times that length, so an
+estimated 2 to 4 s. That leaves about 5x headroom or more for normal replies, so the plan's
+default stays. Not measured: a long reply the player explicitly asks for on a busy GPU.
+When the deadline does cut a turn, any text s2s has buffered but not yet flushed to TTS (up
+to three sentences) is lost with it.
+
+Deviations from the plan text:
+- `tests/e2e/test_tier1_happy_paths.py` was also changed. Two tests required
+  `--max_speech_ms` in `start_all.sh` with a value between 1 and 60 s; those assertions
+  were removed and the other flag checks kept.
+- Extra test `test_upstream_bounds_the_connect_and_each_read` pins the `(5, 15)` timeout on
+  both upstream calls.
+- The deadline is not a hard stop if the brain goes completely silent. Measured in WSL
+  against the real s2s: with a stream that sent deltas every 0.5 s, the 1.5 s deadline
+  ended it at 2.0 s. With a stream that sent `: ok` and then nothing, the timer fired at
+  1.5 s but the iterator only raised at 20.0 s. On Linux, `close()` from the timer thread
+  does not wake a `recv` that is already blocked, so it takes effect when the next bytes
+  arrive or when httpx's 20 s read timeout fires. With no SDK retries and the brain's own
+  15 s read timeout (after which it sends idle events and ends its stream), the worst case
+  is about 35 s, down from about 60 s or more. Interrupting a blocked read would need a
+  different design (shutting down the socket), which the plan does not ask for, so it was
+  left alone.
+
+Not run on the real robot or the live stack. The s2s patch was exercised against the
+installed speech_to_speech 1.0.0 in WSL only, with local fake servers.
+
+New tests: `test_llm_stream_has_total_deadline_and_no_retries` in `tests/test_run_s2s.py`
+(skipped on Windows, run in WSL against the real s2s);
+`test_start_all_does_not_set_finite_max_speech_ms` in the new
+`tests/test_start_all_vad_args.py` (skipped on Windows, run in WSL with the brain venv);
+`test_addressed_stream_sends_headers_immediately` and
+`test_upstream_bounds_the_connect_and_each_read` in `tests/test_upstream.py`.
+
+## P23. The stack notices a dead or wedged process (2026-11-26)
+
+`start_all.sh` ended in a bare `wait`, so a dead s2s, tap, brain or llama went unnoticed and
+the wake daemon kept saying ready. A wedged s2s handler left its pool unit "stuck" while
+`/v1/pool` still answered 200, so every reconnect got `session_limit_reached`.
+
+- **`pool_is_wedged(pool_json, max_drain_s)`** (new `familiar_brain/stack_health.py`,
+  re-exported from `scripts/run_s2s.py`). The real s2s 1.0.0 shape, read from
+  `api/openai_realtime/websocket_router.py`, is
+  `{"size": N, "in_use": n, "units": [{"index", "state", "session_id", ...}]}` with `state`
+  one of `idle`, `active`, `draining` (adds `draining_for_s`) or `stuck` (adds
+  `draining_for_s` and `stuck_for_s`). Any `stuck` unit is wedged; a `draining` unit is
+  wedged once `draining_for_s >= max_drain_s`. The plan's field names were exact.
+- **Pool watchdog** (`scripts/run_s2s.py`, started from `main()` after the patches). A
+  daemon thread polls `http://127.0.0.1:<--port>/v1/pool` every 5 s with
+  `max_drain_s = S2S_STUCK_EXIT_S` (default 45). An unreachable server (models still
+  loading, connection refused, timeout) counts as not wedged; bad JSON logs a WARNING and
+  counts as not wedged. On a wedge it logs the units and the exit at WARNING, flushes the
+  log handlers and calls `os._exit(70)`. In s2s 1.0.0 a unit only turns `stuck` after its
+  10 s drain wait and 180 s quarantine timeout, so in practice the 45 s draining rule fires
+  first. `run_s2s.py` puts the repo root on `sys.path` so the s2s venv can import
+  `familiar_brain.stack_health` (that module imports nothing outside the stdlib).
+- **s2s respawn loop** (`scripts/start_all.sh`). s2s now runs inside `s2s_loop`, a
+  background subshell; `S2S_PID` is the loop's PID, so `wait_for` and the cleanup track the
+  loop. Each exit is logged to stderr (the terminal or `stack.log`) and to `s2s.log` with
+  its exit code, then s2s is started again after 1 s, up to 5 restarts in any 10 minutes;
+  the next exit after that ends the loop. `S2S_RESPAWN=0` turns the loop off. Exit code 70
+  is treated like any other exit, so a wedged pool gets a fresh s2s. With respawn on, an
+  s2s that dies while loading is restarted instead of failing the launch.
+- **No orphaned s2s.** The loop traps TERM and forwards it to its s2s. The cleanup also
+  collects the loop's own children with `pgrep -P` before sending TERM and then KILL, so an
+  s2s that takes longer than 0.3 s to exit is still killed even after the loop is gone. The
+  wake daemon's stop already matches `scripts/start_all.sh` (which matches the loop
+  subshell) and `scripts/run_s2s.py` in its `pkill`.
+- **`wait -n` over the long-lived children.** The final `wait` is now
+  `wait -n -p DEAD_PID` over llama, brain, the s2s loop and the audio tap (only when it was
+  started). `robot_connect.py` is not in the list: it runs in the foreground, configures the
+  robot and exits before this point, and `--skip-robot` / `--native-robot` skip it. When a
+  child exits, the script prints `<name> exited with code <rc>; stopping the stack` and
+  the tail of that child's log to stderr, then `exit 1`; the existing EXIT trap stops the
+  rest. The wake daemon's watcher already turns a non-zero exit (other than 143) into the
+  error state. If a signal stopped the stack during the wait, the script exits with the
+  wait's code (143 on TERM) without the message.
+- **Wake daemon** (`familiar_brain/wake_daemon.py`). `_is_stack_live()` now reads
+  `/v1/pool` as JSON and returns False, with a WARNING, when `pool_is_wedged(pool, 45)`.
+
+Deviations from the plan text:
+- `status()` (plan `:167-202`) was not changed. It already calls `_is_stack_live()` for a
+  sleeping stack and for a ready stack whose process has exited, and the watcher already
+  sets the error state on a non-zero stack exit, so the `_is_stack_live()` change covers it.
+- The watchdog exits on the first poll that finds a wedge. `S2S_STUCK_EXIT_S` is the
+  `max_drain_s` passed to `pool_is_wedged`, so "wedged for 45 s" is measured by s2s's own
+  `draining_for_s`, not by counting polls.
+- Extra test `test_pool_watchdog_exits_70_when_wedged_but_not_while_s2s_loads`.
+- `pgrep` is not in Git Bash, so on Windows bash the cleanup only signals the loop itself.
+  The stack runs in WSL, where procps provides it.
+- The existing e2e stub tests in `tests/e2e/test_tier1_happy_paths.py` now see `start_all.sh`
+  exit 1 when their stub children finish, instead of 0. `f01_3`, `f01_4` and `f01_5` still
+  pass (their assertions accept it); the file was not changed.
+
+Known limits: the watchdog does not catch an s2s whose HTTP server stops answering
+altogether (a timeout counts as not wedged). The 45 s default leaves about 10 s over the
+worst-case LLM turn from P22 (about 35 s). Not run on the real robot or with a real wedged
+s2s; the respawn loop and `wait -n` were exercised with stub children only.
+
+New tests: `test_pool_is_wedged_flags_stuck_and_long_drain` and
+`test_pool_watchdog_exits_70_when_wedged_but_not_while_s2s_loads` in `tests/test_run_s2s.py`
+(run on Windows and in WSL with the s2s venv);
+`test_start_all_exits_when_child_dies` and `test_s2s_respawns_once` in
+`tests/test_start_all_logs.py` (skipped on Windows, run in WSL with the brain venv; the
+second also checks that stopping the stack stops the respawned s2s);
+`test_stack_not_live_when_s2s_pool_stuck` in `tests/test_wake_and_reachy_app.py` (Windows).
+
+Review fixes (same day): the respawn loop writes its current s2s PID to `$RUN_DIR/s2s.pid` and
+`cleanup` always targets it, so the wake daemon's stop (which TERMs the main shell and the loop at
+the same moment) can no longer orphan an s2s that ignores TERM on the GPU and the port; before
+this, `pgrep -P` found nothing once the loop had exited. The pool watchdog now survives any one
+bad poll (`http.client` errors, a non-dict body, a non-numeric `draining_for_s`) with a WARNING
+instead of its thread dying silently. New tests: `test_stop_kills_s2s_even_when_the_respawn_loop_dies_first`
+(WSL), `test_pool_is_wedged_tolerates_odd_pool_bodies`, `test_pool_watchdog_keeps_running_after_a_poll_error`.
+
+## P28. Companion UI recovery controls work (2026-11-26)
+
+The laptop Companion UI looked frozen or ignored its recovery buttons. Each verified bug
+from the polish backlog is fixed:
+
+- **Reconnect button.** `app.js` read an undeclared `lastState`, so pressing Reconnect threw
+  before any request. It now reads `latestState`.
+- **Live updates.** The SSE `familiar:state` listener called an undefined `applyState`, so
+  every pushed update threw. `applyState(s)` now sets `latestState` and calls
+  `renderStatus(s, false)`; `refreshState` uses it too.
+- **Poll cannot wedge.** `apiJson` aborts after 5 s with an `AbortController`, so a hung
+  request rejects and `refreshState`'s `finally` always clears `pollInFlight`.
+- **Stale error banner.** The "Brain unreachable" banner now hides on the next good poll.
+  Only that banner is cleared, so action results still show until replaced.
+- **Robot-only buttons.** Served from the laptop :8090, `/_familiar/boot-status` 404s.
+  `companion_plus.js` now stops its 750 ms poll on the first 404, hides Speak Test and Reset
+  Audio, and adds the note "Only available from the robot UI on port 8043".
+- **Mute and stop logging.** `api_mute_stop` now calls `_publish_state()`, as mute and
+  unmute already did, so the UI updates at once.
+- **Campaign switch keeps the session.** `_on_campaign_switched` still ends and queues the
+  old session, then starts a new one in the new campaign's sessions dir if one was active.
+- **Native Reconnect reaches the robot.** In native mode `POST /api/robot/reconnect` only
+  set a detail string and returned 200 without contacting the robot. It now forwards to the
+  native app's `:8043` audio reconnect route, on the request's `host`, else the known robot
+  host, else `reachy-mini.local`, with a 5 s timeout. A failure returns 503 and logs a
+  WARNING.
+
+Deviations from the plan text:
+
+- The plan names the native route `/_familiar/reconnect`. No such route exists:
+  `reachy_familiar/web.py` serves only `/_familiar/speak-test` and
+  `/_familiar/reconnect-audio`, so a forward to `/_familiar/reconnect` would always 404. The
+  forward uses `/_familiar/reconnect-audio`, the native app's only reconnect route and the
+  one the robot UI's Reset Audio button already calls.
+- The plan lists the error banner under `app.py`; the banner lives in `app.js`, so the fix
+  is there.
+- The plan puts `test_campaign_switch_keeps_session_active` in `tests/test_campaign.py`.
+  That file tests campaign memory and has no app fixture; the campaign switch tests and the
+  native-mode app fixture live in `tests/test_native_robot_and_profiles.py`, so both app
+  tests went there.
+- The existing `test_native_robot_mode_never_reports_disabled_before_or_after_heartbeat`
+  now patches `requests.Session.post`, because native Reconnect makes a real HTTP call and
+  the test must not reach the network. Its assertions are unchanged.
+
+Not run in a browser or against the real robot; the JS changes are pinned by static
+checks of the served files only.
+
+New tests: `test_app_js_has_no_undeclared_state_refs`,
+`test_app_js_poll_cannot_wedge_and_good_poll_clears_banner`,
+`test_companion_plus_handles_missing_familiar_routes` and `test_mute_stop_publishes_state`
+in `tests/test_companion_ui.py`; `test_campaign_switch_keeps_session_active` and
+`test_robot_reconnect_route_reaches_native_app` in `tests/test_native_robot_and_profiles.py`.
+
+Review fixes (same day): the 5 s fetch abort is now opt-in (`apiJson(url, { timeoutMs })`) and
+only the `/api/state` and `/api/sessions` polls pass it. Before this, every UI action aborted at
+5 s, so the official-app Reconnect and speaker enroll showed "timed out" while the server kept
+working, and a retry started a second robot connect. Native Reconnect now prefers the launcher's
+`ROBOT_HOST` over the heartbeat's hardcoded `reachy-mini.local`, which WSL2 often cannot resolve.
+New test: `test_native_reconnect_prefers_launcher_robot_host`; `test_app_js_poll_cannot_wedge_and_good_poll_clears_banner`
+now pins the opt-in timeout.
+
+## P26. Speaker ID no longer leaves Rocky ignoring the table (2026-11-26)
+
+The tap kept the last matched speaker, usually the DM, for up to 15 s. Real clients never
+send `input_audio_buffer.commit`, so only streaming matches ran, and those never cleared the
+label on a miss. Whoever spoke next was gated as the DM. Fixed in four places:
+
+- **Label expires on a miss.** The streaming match in `_tap_worker` now uses
+  `clear_on_miss=True`, so a non-match clears the role instead of keeping the old one.
+  `config/brain.toml` sets `speakers.max_age_s = 3.0` (read by `_query_tap_current` in
+  `app.py`), so a stale label also ages out in 3 s instead of 15 s.
+- **Worker survives errors.** `_tap_worker` used to die silently on any exception, which
+  ended speaker ID for the night. The per-batch work moved into `_drain_tap_queue`; the loop
+  catches `Exception`, logs at WARNING with the traceback, sleeps 0.1 s so a repeating error
+  cannot spin hot, and carries on. `asyncio.CancelledError` is not caught, so shutdown still
+  cancels the worker cleanly.
+- **GA input rate.** `_inspect_client_text` now also reads
+  `session.audio.input.format.rate` from a GA `session.update`. Before, a 24 kHz GA client
+  was decoded as 16 kHz.
+- **Tap and brain read the same file.** `_notify_tap_reload` always sends `store_path`
+  (the active campaign's `speakers.json`), so enroll, delete and clear no longer leave the
+  tap on `data/speakers.json`. It now returns whether the tap answered and logs a WARNING
+  when it does not. New `_sync_tap_store` (exposed as `app.extensions["sync_tap_store"]`,
+  called from `main()`) sends the same reload at startup from a daemon thread: up to 30
+  attempts, 0.3 s request timeout, 1 s apart, stopping as soon as the tap answers, and one
+  WARNING if it gives up. It never blocks brain startup or a request thread.
+
+Deviations from the plan:
+
+- The startup retry is called from `main()`, not from `create_app`, so the many test apps
+  built by `create_app` do not start background threads that post to test taps.
+- Two extra tests pin the startup retry (stops once the tap answers; warns when it gives up).
+
+Not run against the real robot. The e2e suites that drive the tap (`tests/e2e/`) were not
+run here.
+
+New tests in `tests/test_speaker_id.py`: `test_tap_role_clears_on_streaming_miss`,
+`test_tap_worker_survives_exception`, `test_tap_reads_ga_input_rate`,
+`test_notify_tap_reload_always_sends_store_path`,
+`test_tap_store_sync_retries_in_background_until_tap_answers` and
+`test_tap_store_sync_gives_up_with_warning`.
+
+Review fixes (same day): the startup store sync now retries for up to 15 minutes (900 x 1 s).
+`start_all.sh` starts the tap only after llama (up to 600 s cold) and s2s (up to 240 s) are
+ready, so the 30 s version always gave up first and the tap kept reading `data/speakers.json`.
+The streaming match now clears the label only after two misses in a row that contain a voice
+(conf above 0); a silent window leaves expiry to `speakers.max_age_s`. With a single miss
+clearing it, one laugh or dice clatter during the DM's narration dropped the DM label, and the
+gate then answered the DM inside an open follow-up window. Commits (the rare explicit path) still
+clear on the first miss. New tests: `test_one_noisy_streaming_window_keeps_the_dm_label`,
+`test_silent_streaming_window_keeps_the_dm_label`, `test_startup_tap_sync_outlasts_a_cold_stack_start`.
+
+## P24. robot_connect warns on an old app and avoids a double backend restart (2026-11-26)
+
+Plan Task 9 (findings cause 6). Pollen's conversation app before 1.2.0 has no send timeout
+on mic frames, so a dead network path can freeze its record loop for minutes. The robot
+upgrade is a runbook step (Task 10); this change makes an old app visible at connect time.
+
+- **`parse_app_version(listing)`** and **`MIN_APP_VERSION = (1, 2, 0)`** in
+  `scripts/robot_connect.py`. The version is read from `version` or `info.version` in the
+  `/rpc` `conversation.status` reply, then the daemon's `current-app-status`. Older than
+  1.2.0 logs a WARNING naming the minimum; a missing or unreadable version logs a WARNING
+  too. Neither stops the connect flow. `main()` now sets up logging so the WARNING lands in
+  `robot_connect.log` with its level.
+- **`backend.config` is skipped** when `conversation.status` already reports the same host
+  and port and `backend_connected` is True.
+- **`personalities.apply` no longer passes `force: True`**, so applying the profile does not
+  restart the backend a second time.
+
+Deviations from the plan text:
+- MIN_APP_VERSION was confirmed only from the v1.2.0 release note ("Drop a dead realtime
+  socket when an audio send stalls"); the constant name `AUDIO_SEND_TIMEOUT_S` was not
+  checked in Pollen's source, and pages of releases older than v0.6.2 were not read.
+- The skip of `backend.config` also requires `backend_connected` True. The plan says skip
+  when host and port are unchanged; skipping while disconnected would leave a stuck app
+  with no reconnect, and re-running robot_connect is how TJ recovers it.
+- The field names for the app version (`version`, `info.version`) and for the current
+  backend target in `conversation.status` (`host`, `port`, as `tests/e2e/fakes.py` models
+  it) were not checked against the real app. If the real reply lacks them, the result is
+  a "could not read" WARNING and `backend.config` is sent as before, never a crash.
+
+Not run against the real robot or app.
+
+New tests in `tests/test_robot_connect.py`: `test_warns_on_old_app_version`,
+`test_no_warning_on_current_version`, `test_configure_skips_backend_config_when_unchanged`,
+`test_apply_is_not_forced`.
+
+Review fixes (same day): when `backend.config` is skipped, `personalities.apply` is sent with
+`force: True`, so Reconnect on a stuck app that still reports connected restarts its backend
+exactly once (without this, Reconnect became a no-op in that case). The version check now only
+uses the daemon status when it describes the conversation app, so another app's version is never
+read as ours. New tests: `test_skipped_backend_config_still_restarts_backend_once`,
+`test_version_check_ignores_another_running_app`.
+
+## P25. Native mic thread survives send stalls and reconnects when it dies (2026-11-26)
+
+`SimpleWebSocket.recv_text` used to set a 0.5 s timeout on the socket that the
+`reachy-mic-tx` thread also uses for `sendall`. Any send stall over 0.5 s raised
+`TimeoutError`, `_mic_loop` logged it at DEBUG and exited, and `_run_session` kept
+answering pings with `connected=True`, so Rocky went deaf until someone pressed Reconnect.
+
+- **`recv_text(timeout)`** (`reachy_familiar/audio_bridge.py`) no longer touches the socket
+  timeout. When its buffer is empty it waits up to `timeout` with `select.select` for the
+  first byte and returns None if nothing is readable. Once a frame starts, the rest is read
+  with the 10 s timeout set once in `__init__`, so a frame split across slow packets no
+  longer tears the session down, and a stalled `sendall` waits up to 10 s instead of 0.5 s.
+- **`_run_session`** raises `ConnectionError("mic sender thread exited")` after any
+  `recv_text` when the mic thread is dead and `stop_event` is not set, so `run_loop`
+  reconnects (it logs that at WARNING, as before).
+- **`_mic_loop`** logs its ending exception at WARNING and calls `ws.close()` before
+  `break`.
+- **`SimpleWebSocket.close()`** is safe from any thread: `shutdown(SHUT_RDWR)` then
+  `close()`, each swallowing `OSError`.
+- **`RealtimeAudioBridge.mic_alive`** is True while the `reachy-mic-tx` thread runs (for the
+  Task 3 heartbeat).
+
+Deviations from the plan text:
+- `close()` no longer sends a WebSocket close frame. The plan says "shutdown then close";
+  sending a frame needs the send lock, which a mic thread stuck in `sendall` holds, so it
+  could block the caller (for example `request_reconnect` on the web thread) for up to 10 s.
+  The server now sees a plain TCP close instead of a 1000 close frame.
+- The `socket.timeout` catch around the first two header bytes in `recv_text` was removed:
+  after `select` reports data, a timeout there is a stall mid-frame and now propagates.
+- If the robot object has no `media.get_audio_sample`, `_mic_loop` returns at once and the
+  session now reconnects every 2 s. The real `ReachyMini` always has it.
+
+Not run against the real robot.
+
+New tests in `tests/test_audio_bridge_backpressure.py`:
+`test_mic_thread_survives_or_reconnects_after_send_stall` (fake server with
+`SO_RCVBUF=8192` that stops reading for 4 s), `test_partial_frame_does_not_tear_down_session`,
+`test_mic_send_failure_triggers_reconnect`. All three failed against the old code on Windows
+for the reasons the plan predicted (mic thread dead with no reconnect; `TimeoutError` from
+`_take`; `_run_session` still running) and pass on Windows (Python 3.11, uv) and in WSL
+Ubuntu-24.04. `tests/test_native_robot_and_profiles.py` and `tests/test_wake_and_reachy_app.py`
+pass on Windows.
+
+## P27. Native app restarts stalled mic capture and reports it in the heartbeat (2026-11-26)
+
+If GStreamer or ALSA stopped delivering samples, `get_audio_sample()` returned None forever
+and `_mic_loop` slept in a loop with no restart. Capture was also started only once in
+`run_loop`, so a reconnect never re-armed it.
+
+- **`_mic_loop`** (`reachy_familiar/audio_bridge.py`) tracks `last_sample_at`. After
+  `MIC_STALL_S` (1.5 s) of None samples it logs a WARNING containing "stalled" and calls
+  `_restart_media()`. After `MIC_MAX_RESTARTS` (2) restarts that bring no samples back, it
+  sets `mic_stalled`, logs a WARNING, calls `ws.close()` and exits, so the session
+  reconnects (P25). The first sample after a restart resets the counter, clears
+  `mic_stalled` and logs "mic capture resumed after restart" at INFO.
+- **`_restart_media()`** calls `stop_recording()`, `start_recording()`, `start_playing()`
+  on `reachy.media`. Each call that raises is logged at WARNING and the others still run, so
+  a media error never kills the mic thread.
+- **`run_loop`** no longer starts recording and playback once. **`_run_session`** calls
+  `_restart_media()` on every session, so a reconnect also re-arms capture. `run_loop`
+  still stops recording and playback when it exits.
+- **`RealtimeAudioBridge.mic_stalled`** (new) and `mic_alive` (P25) are sent as
+  `mic_alive` and `mic_stalled` in the robot heartbeat and kept in `boot_status()`
+  (`reachy_familiar/main.py`).
+
+Deviations from the plan text:
+- `_restart_media()` runs right after the WebSocket connects, not as the literal first line
+  of `_run_session`. While the laptop is unreachable each connect attempt fails, and
+  restarting the GStreamer pipeline every 2 s for nothing seemed worse than waiting for a
+  live connection.
+- Only a None sample counts as a stall, as the plan says. An empty array still sleeps
+  without counting toward a restart.
+- The brain's `/api/robot/heartbeat` (`familiar_brain/app.py` around line 1384) copies only
+  the fields it knows, so `mic_alive` and `mic_stalled` do not reach the Companion UI yet.
+  Task 3 lists only the two native app files, so the brain was not changed.
+- `start_playing()` now runs on every session without a `stop_playing()` first, as the plan
+  says. The `reachy_mini` package is not installed here, so repeat calls were not checked
+  against the real media API.
+
+Not run against the real robot.
+
+New tests in `tests/test_audio_bridge_backpressure.py`:
+`test_mic_loop_restarts_dead_capture` (frames for 0.5 s, then None until a
+`stop_recording` then `start_recording`) and
+`test_capture_dead_after_two_restarts_forces_reconnect` (never recovers, and
+`stop_recording` raises; asserts two restarts, a WARNING naming `stop_recording`,
+`mic_stalled` and `ws.close()`). Both failed against the old code for the reasons the plan
+predicted (no restart calls; WebSocket never closed) and pass on Windows (Python 3.11, uv).
+`tests/test_native_robot_and_profiles.py` and `tests/test_wake_and_reachy_app.py` pass on
+Windows.
+
+Whole-branch review fix (same day): `Upstream.complete()` (the non-streaming warmup probe and
+history compaction) is back to a 60 s read timeout. llama sends nothing on that path until it has
+finished, so the 15 s read meant for streaming turns would make a long compaction fail. Streaming
+turns keep `(5, 15)`. `test_upstream_bounds_the_connect_and_each_read` pins both.

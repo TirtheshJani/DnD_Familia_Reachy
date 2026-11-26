@@ -233,3 +233,216 @@ def test_real_s2s_vad_and_lm_processor_bound_continuous_speech(monkeypatch: pyte
     list(proc.process(EndOfResponse(turn_id="turn_ignore", turn_revision=0)))
     assert tracker.is_committed("turn_ignore", 0) is True
     assert getattr(KokoroTTSHandler._process_kokoro, "_familiar_voice_guard_patched", False) is True
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("speech_to_speech") is None,
+    reason="speech_to_speech package only installed in WSL2 s2s venv",
+)
+def test_unanswered_gesture_call_does_not_block_next_turn() -> None:
+    from openai.types.realtime.conversation_item import (
+        RealtimeConversationItemFunctionCall,
+        RealtimeConversationItemFunctionCallOutput,
+        RealtimeConversationItemUserMessage,
+    )
+    from speech_to_speech.LLM.chat import Chat
+
+    run_s2s.apply_s2s_patches()
+
+    def user(text: str) -> RealtimeConversationItemUserMessage:
+        return RealtimeConversationItemUserMessage(
+            type="message", role="user", content=[{"type": "input_text", "text": text}]
+        )
+
+    def call(name: str, call_id: str) -> RealtimeConversationItemFunctionCall:
+        return RealtimeConversationItemFunctionCall(
+            type="function_call", name=name, call_id=call_id, arguments="{}"
+        )
+
+    chat = Chat(size=10)
+    chat.add_item(user("Rocky, the dragon is here"))
+    # The pipeline records an LLM-emitted call this way (language_model.py).
+    chat.add_ordered_function_call(call("play_emotion", "call_x"))
+    chat.add_item(user("Rocky, what do we do"))
+    assert chat.has_pending_tool_calls() is False
+    # The realtime handler checks a copy of the chat before response.create.
+    assert chat.copy(deep=True).has_pending_tool_calls() is False
+
+    blocked = Chat(size=10)
+    blocked.add_item(user("Rocky, look at this"))
+    blocked.add_ordered_function_call(call("camera", "call_cam"))
+    assert blocked.has_pending_tool_calls() is True
+
+    # The app's late result for the gesture is still accepted.
+    chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output", call_id="call_x", output='{"status":"ok"}'
+        )
+    )
+    assert chat.has_pending_tool_calls() is False
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("speech_to_speech") is None,
+    reason="speech_to_speech package only installed in WSL2 s2s venv",
+)
+def test_llm_stream_has_total_deadline_and_no_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    import httpx
+    from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
+
+    posts: list[str] = []
+    fail_status: list[int] = []
+    stop = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args: object) -> None:
+            pass
+
+        def do_POST(self) -> None:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            if not body.get("stream"):  # setup()'s warmup probe
+                out = json.dumps({"id": "resp_w", "object": "response", "status": "completed",
+                                  "created_at": 0, "model": "familiar", "output": []}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+                return
+            posts.append(self.path)
+            if fail_status:
+                self.send_response(fail_status[0])
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            n = 0
+            while not stop.is_set():
+                ev = {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0,
+                      "content_index": 0, "sequence_number": n, "delta": "and on ", "logprobs": []}
+                try:
+                    self.wfile.write(f"event: {ev['type']}\ndata: {json.dumps(ev)}\n\n".encode())
+                    self.wfile.flush()
+                except OSError:
+                    return
+                n += 1
+                stop.wait(0.5)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv("FAMILIAR_LLM_DEADLINE_S", "1.5")
+    run_s2s.apply_s2s_patches()
+    handler = ResponsesApiModelHandler.__new__(ResponsesApiModelHandler)
+    handler.setup(model_name="familiar", base_url=f"http://127.0.0.1:{server.server_address[1]}/v1",
+                  api_key="none", stream=True, request_timeout_s=5.0)
+    api_input = [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Rocky?"}]}]
+    try:
+        start = time.monotonic()
+        api_response = handler._request(api_input, {})
+        with pytest.raises(httpx.ReadTimeout):
+            for _ in handler._iter_stream_events(api_response):
+                assert time.monotonic() - start < 3.0, "the stream ran past its deadline"
+        assert time.monotonic() - start < 3.0
+        assert len(posts) == 1
+
+        # A failed request is not sent again: each SDK retry used to cost another read timeout.
+        fail_status.append(500)
+        with pytest.raises(Exception):
+            handler._request(api_input, {})
+        assert len(posts) == 2
+    finally:
+        stop.set()
+        server.shutdown()
+        server.server_close()
+
+
+def test_pool_is_wedged_flags_stuck_and_long_drain() -> None:
+    def pool(*units: dict) -> dict:
+        return {"size": len(units), "in_use": len(units), "units": list(units)}
+
+    # Field names match the installed s2s 1.0.0 /v1/pool handler (websocket_router.py).
+    assert run_s2s.pool_is_wedged(pool({"index": 0, "state": "stuck", "draining_for_s": 200.0, "stuck_for_s": 20.0}), 45) is True
+    assert run_s2s.pool_is_wedged(pool({"index": 0, "state": "draining", "draining_for_s": 60.0}), 45) is True
+    assert run_s2s.pool_is_wedged(pool({"index": 0, "state": "draining", "draining_for_s": 3.0}), 45) is False
+    assert run_s2s.pool_is_wedged(pool({"index": 0, "state": "idle", "session_id": None}), 45) is False
+    assert run_s2s.pool_is_wedged(pool({"index": 0, "state": "active", "session_id": "s"}), 45) is False
+    assert run_s2s.pool_is_wedged({}, 45) is False
+
+
+def test_pool_watchdog_exits_70_when_wedged_but_not_while_s2s_loads() -> None:
+    import json
+    import socket
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    # Nothing listening yet (models still loading): connection refused is not a wedge.
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        closed_port = s.getsockname()[1]
+    assert run_s2s.pool_wedged_now(f"http://127.0.0.1:{closed_port}/v1/pool", 45.0, timeout_s=1.0) is False
+
+    body = json.dumps({"size": 1, "in_use": 1, "units": [{"index": 0, "state": "stuck", "session_id": "s",
+                                                           "draining_for_s": 200.0, "stuck_for_s": 20.0}]}).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args: object) -> None:
+            pass
+
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    codes: list[int] = []
+
+    def fake_exit(code: int) -> None:
+        codes.append(code)
+        raise SystemExit(code)
+
+    try:
+        with pytest.raises(SystemExit):
+            run_s2s.watch_pool(f"http://127.0.0.1:{server.server_address[1]}/v1/pool",
+                               max_drain_s=45.0, interval_s=0.05, exit_fn=fake_exit)
+        assert codes == [70]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_pool_is_wedged_tolerates_odd_pool_bodies() -> None:
+    for odd in (None, [], "x", {"units": None}, {"units": ["x", None]},
+                {"units": [{"state": "draining", "draining_for_s": "soon"}]}):
+        assert run_s2s.pool_is_wedged(odd, 45.0) is False  # type: ignore[arg-type]
+
+
+def test_pool_watchdog_keeps_running_after_a_poll_error(monkeypatch, caplog) -> None:
+    calls: list[int] = []
+
+    def flaky(url: str, max_drain_s: float, timeout_s: float = 5.0) -> bool:
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("IncompleteRead")
+        return True
+
+    codes: list[int] = []
+
+    def fake_exit(code: int) -> None:
+        codes.append(code)
+        raise SystemExit(code)
+
+    monkeypatch.setattr(run_s2s, "pool_wedged_now", flaky)
+    with caplog.at_level("WARNING"), pytest.raises(SystemExit):
+        run_s2s.watch_pool("http://127.0.0.1:9/v1/pool", max_drain_s=45.0, interval_s=0.01, exit_fn=fake_exit)
+    assert codes == [run_s2s.WEDGED_EXIT_CODE]
+    assert any("poll failed" in r.getMessage() for r in caplog.records if r.levelname == "WARNING")

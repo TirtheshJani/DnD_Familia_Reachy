@@ -7,23 +7,48 @@ In speech-to-speech 1.0.0:
 2. LMOutputProcessor.process never commits speculative_turns when an LLM response
    contains only tool calls (e.g. idle_do_nothing on IGNORE turns) and no TTSInput,
    leaving every IGNORE turn uncommitted forever.
+3. Chat.has_pending_tool_calls refuses every later LLM request while any function_call
+   lacks its output, with no timeout, so one robot gesture result the app never sends
+   silences the familiar until reconnect.
+4. One brain request could hold the LLM thread for about a minute: the SDK retried a
+   timed-out request twice and nothing bounded a slow stream.
+5. A wedged handler leaves its pool unit "stuck" forever while /v1/pool still answers 200,
+   so every reconnect gets session_limit_reached. A watchdog thread exits with code 70
+   so start_all.sh restarts s2s.
 
 This wrapper applies surgical runtime guards before launching speech_to_speech.cli.main().
 """
 from __future__ import annotations
 
 import functools
+import json
 import logging
 import os
 import re
 import sys
-from typing import Any, Iterator
+import threading
+import time
+import urllib.request
+from pathlib import Path
+from typing import Any, Callable, Iterator
+
+# Run as a script from the s2s venv, so the repo root is not on sys.path by default.
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+# pool_is_wedged is re-exported here; the wake daemon imports it from familiar_brain.
+from familiar_brain.stack_health import DEFAULT_STUCK_EXIT_S, pool_is_wedged  # noqa: E402
 
 logger = logging.getLogger("run_s2s")
 
 DEFAULT_MAX_TURN_AUDIO_S = 30.0
 DEFAULT_MAX_TURN_REVISIONS = 8
+DEFAULT_LLM_DEADLINE_S = 20.0
 KOKORO_VOICE_RE = re.compile(r"^[abefhijpz][fm]_[a-z][a-z0-9_]*$")
+# Robot-side tools that only move Rocky (robot_profile/familiar/profile.md, app.py
+# GESTURE_TOOLS). An unanswered call to one of these must not block later turns.
+ROBOT_GESTURE_TOOLS = frozenset({"play_emotion", "stop_emotion", "head_tracking", "move_head", "idle_do_nothing"})
 
 
 def _env_float(name: str, default: float) -> float:
@@ -158,6 +183,93 @@ def patch_lm_output_processor(lm_proc_cls: type[Any]) -> bool:
     return True
 
 
+def patch_chat_pending_tools(chat_cls: type[Any]) -> bool:
+    """Let later turns generate while only robot gesture calls await their output.
+
+    Chat.has_pending_tool_calls is the gate every LLM request and response.create checks.
+    A gesture needs no reply and the app may never send its result, so it must not hold
+    the conversation. Its late output is still accepted by append_tool_output.
+    """
+    if getattr(chat_cls.has_pending_tool_calls, "_familiar_pending_patched", False):
+        return False
+
+    orig_has_pending = chat_cls.has_pending_tool_calls
+
+    @functools.wraps(orig_has_pending)
+    def has_blocking_pending_tool_calls(self: Any) -> bool:
+        with self._lock:
+            return any(
+                getattr(fc, "name", None) not in ROBOT_GESTURE_TOOLS
+                for fc in self._pending_tool_calls.values()
+            )
+
+    has_blocking_pending_tool_calls._familiar_pending_patched = True  # type: ignore[attr-defined]
+    chat_cls.has_pending_tool_calls = has_blocking_pending_tool_calls
+    return True
+
+
+def patch_responses_request(lm_cls: type[Any]) -> bool:
+    """Bound one brain request: no SDK retries, and a total deadline on the stream.
+
+    Each retry cost another httpx read timeout, and nothing could interrupt a slow stream,
+    so one turn held the LLM thread for about a minute. At the deadline the stream is
+    closed and httpx.ReadTimeout raised, which s2s's _generate already turns into its
+    fallback reply and an EndOfResponse.
+    """
+    if getattr(lm_cls._request, "_familiar_deadline_patched", False):
+        return False
+
+    orig_request = lm_cls._request
+    orig_iter = lm_cls._iter_stream_events
+
+    @functools.wraps(orig_request)
+    def no_retry_request(self: Any, api_input: Any, optional_kwargs: dict[str, Any]) -> Any:
+        if self.client.max_retries != 0:
+            self.client = self.client.with_options(max_retries=0)
+        return orig_request(self, api_input, optional_kwargs)
+
+    @functools.wraps(orig_iter)
+    def deadline_iter(self: Any, api_response: Any) -> Iterator[Any]:
+        import httpx
+
+        deadline_s = _env_float("FAMILIAR_LLM_DEADLINE_S", DEFAULT_LLM_DEADLINE_S)
+        expired = threading.Event()
+        lock = threading.Lock()
+        finished = False
+
+        def expire() -> None:
+            with lock:  # never close a stream this generator has already let go of
+                if finished:
+                    return
+                expired.set()
+            logger.warning("LLM stream passed its %.1fs deadline; closing it", deadline_s)
+            api_response.close()
+
+        timer = threading.Timer(deadline_s, expire)
+        timer.daemon = True
+        timer.start()
+        try:
+            for event in orig_iter(self, api_response):
+                if expired.is_set():
+                    break
+                yield event
+        except Exception as exc:
+            if expired.is_set():
+                raise httpx.ReadTimeout(f"LLM stream passed its {deadline_s:.1f}s deadline") from exc
+            raise
+        finally:
+            with lock:
+                finished = True
+            timer.cancel()
+        if expired.is_set():
+            raise httpx.ReadTimeout(f"LLM stream passed its {deadline_s:.1f}s deadline")
+
+    no_retry_request._familiar_deadline_patched = True  # type: ignore[attr-defined]
+    lm_cls._request = no_retry_request
+    lm_cls._iter_stream_events = deadline_iter
+    return True
+
+
 def is_valid_kokoro_voice(voice: str | None) -> bool:
     return bool(voice and KOKORO_VOICE_RE.match(voice.strip()))
 
@@ -222,7 +334,9 @@ def apply_s2s_patches(
     max_turn_audio_s: float | None = None,
     max_turn_revisions: int | None = None,
 ) -> None:
+    from speech_to_speech.LLM.chat import Chat  # type: ignore[import-not-found]
     from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor  # type: ignore[import-not-found]
+    from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler  # type: ignore[import-not-found]
     from speech_to_speech.TTS.kokoro_handler import KokoroTTSHandler  # type: ignore[import-not-found]
     from speech_to_speech.VAD.vad_handler import VADHandler  # type: ignore[import-not-found]
 
@@ -232,13 +346,79 @@ def apply_s2s_patches(
         max_turn_revisions=max_turn_revisions,
     )
     patch_lm_output_processor(LMOutputProcessor)
+    patch_chat_pending_tools(Chat)
+    patch_responses_request(ResponsesApiModelHandler)
     patch_kokoro_voice_guard(KokoroTTSHandler)
+
+
+WEDGED_EXIT_CODE = 70
+POOL_POLL_INTERVAL_S = 5.0
+
+
+def pool_wedged_now(url: str, max_drain_s: float, timeout_s: float = POOL_POLL_INTERVAL_S) -> bool:
+    """One /v1/pool poll. Unreachable (models still loading) counts as not wedged."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout_s) as resp:
+            pool = json.load(resp)
+    except OSError:
+        return False
+    except ValueError as exc:
+        logger.warning("pool watchdog: /v1/pool returned bad JSON: %s", exc)
+        return False
+    if pool_is_wedged(pool, max_drain_s):
+        logger.warning("pool watchdog: s2s pool is wedged: %s", pool.get("units") if isinstance(pool, dict) else pool)
+        return True
+    return False
+
+
+def watch_pool(
+    url: str,
+    *,
+    max_drain_s: float,
+    interval_s: float = POOL_POLL_INTERVAL_S,
+    exit_fn: Callable[[int], Any] = os._exit,
+) -> None:
+    while True:
+        time.sleep(interval_s)
+        try:
+            wedged = pool_wedged_now(url, max_drain_s, timeout_s=interval_s)
+        except Exception:
+            # e.g. http.client.IncompleteRead; the watchdog must outlive any one bad poll.
+            logger.warning("pool watchdog: poll failed", exc_info=True)
+            continue
+        if wedged:
+            logger.warning("pool watchdog: exiting with code %d so start_all.sh restarts s2s", WEDGED_EXIT_CODE)
+            # os._exit skips logging's flush at exit, so flush the WARNING into s2s.log first.
+            for handler in logging.getLogger().handlers:
+                handler.flush()
+            sys.stderr.flush()
+            exit_fn(WEDGED_EXIT_CODE)
+
+
+def _serve_port(args: list[str]) -> int:
+    for i, arg in enumerate(args):
+        if arg == "--port" and i + 1 < len(args):
+            return int(args[i + 1])
+        if arg.startswith("--port="):
+            return int(arg.split("=", 1)[1])
+    return 8765  # speech_to_speech realtime server default
+
+
+def start_pool_watchdog(args: list[str]) -> threading.Thread:
+    url = f"http://127.0.0.1:{_serve_port(args)}/v1/pool"
+    max_drain_s = _env_float("S2S_STUCK_EXIT_S", DEFAULT_STUCK_EXIT_S)
+    thread = threading.Thread(
+        target=watch_pool, args=(url,), kwargs={"max_drain_s": max_drain_s}, daemon=True, name="pool-watchdog"
+    )
+    thread.start()
+    return thread
 
 
 def main(argv: list[str] | None = None) -> int:
     configure_cuda_env()
     configure_espeak_env()
     apply_s2s_patches()
+    start_pool_watchdog(list(sys.argv[1:] if argv is None else argv))
 
     from speech_to_speech.cli import main as s2s_main  # type: ignore[import-not-found]
 

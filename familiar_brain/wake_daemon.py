@@ -19,8 +19,11 @@ import threading
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TextIO
+
+from familiar_brain.stack_health import DEFAULT_STUCK_EXIT_S, pool_is_wedged
 
 log = logging.getLogger("familiar.wake_daemon")
 
@@ -29,6 +32,21 @@ DEFAULT_WAKE_PORT = 8091
 DEFAULT_DISCOVER_PORT = 8092
 DEFAULT_BRAIN_PORT = 8090
 DEFAULT_WS_PORT = 8765
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+
+def setup_logging(repo_root: Path) -> RotatingFileHandler:
+    """Log to data/logs/wake_daemon.log as well: under pythonw.exe there is no stderr to read."""
+    log_dir = Path(repo_root) / "data" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(
+        log_dir / "wake_daemon.log", maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.setLevel(logging.INFO)
+    return handler
 
 
 def detect_lan_ip(peer_ip: str = "10.0.0.100") -> str:
@@ -60,6 +78,17 @@ def _http_ok(url: str, timeout: float = 1.5) -> bool:
             return 200 <= resp.status < 300
     except Exception:
         return False
+
+
+def _http_json(url: str, timeout: float = 1.5) -> dict[str, Any] | None:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            if not 200 <= resp.status < 300:
+                return None
+            data = json.load(resp)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _http_post_quiet(url: str, timeout: float = 3.0) -> None:
@@ -97,6 +126,7 @@ class StackManager:
 
         self._lock = threading.Lock()
         self._proc: subprocess.Popen[str] | None = None
+        self._stack_log_path: Path | None = None
         self._state = "sleeping"
         self._stage = "idle"
         self._detail = "GPU stack sleeping (0 MiB VRAM)"
@@ -112,15 +142,27 @@ class StackManager:
     def _is_stack_live(self) -> bool:
         if self._probe_fn is not None:
             return bool(self._probe_fn())
-        return _http_ok(f"http://127.0.0.1:{self.brain_port}/api/state") and _http_ok(
-            f"http://127.0.0.1:{self.ws_port}/v1/pool"
-        )
+        if not _http_ok(f"http://127.0.0.1:{self.brain_port}/api/state"):
+            return False
+        pool = _http_json(f"http://127.0.0.1:{self.ws_port}/v1/pool")
+        if pool is None:
+            return False
+        if pool_is_wedged(pool, DEFAULT_STUCK_EXIT_S):
+            log.warning("s2s pool is wedged, so the stack is not live: %s", pool.get("units"))
+            return False
+        return True
 
     def _default_spawn(self) -> subprocess.Popen[str]:
         wsl_repo = windows_to_wsl_path(self.repo_root)
+        # The daemon names the run dir so it can write the stack's stdout to stack.log there;
+        # start_all.sh puts its child logs in the RUN_DIR it is given.
+        run_name = time.strftime("%Y%m%d-%H%M%S")
+        run_dir = self.repo_root / "data" / "logs" / run_name
+        run_dir.mkdir(parents=True, exist_ok=True)
+        self._stack_log_path = run_dir / "stack.log"
         bash_cmd = (
             f"unset SSL_CERT_FILE; cd '{wsl_repo}' && "
-            f"./scripts/start_all.sh --native-robot --auto-session"
+            f"RUN_DIR='data/logs/{run_name}' ./scripts/start_all.sh --native-robot --auto-session"
         )
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         return subprocess.Popen(
@@ -236,16 +278,20 @@ class StackManager:
             try:
                 proc = (self._spawn_fn or self._default_spawn)()
                 self._proc = proc
+                stack_log_path = self._stack_log_path
             except Exception as exc:
+                log.warning("failed to start stack: %s", exc)
                 self._state = "error"
                 self._stage = "error"
                 self._detail = f"Failed to start stack: {exc}"
                 self._updated_at = time.time()
                 return self._status_locked()
-        threading.Thread(target=self._watch_boot, args=(proc,), daemon=True, name="wake-watch").start()
+        threading.Thread(
+            target=self._watch_boot, args=(proc, stack_log_path), daemon=True, name="wake-watch"
+        ).start()
         return self.status()
 
-    def _watch_boot(self, proc: subprocess.Popen[str]) -> None:
+    def _watch_boot(self, proc: subprocess.Popen[str], stack_log_path: Path | None = None) -> None:
         stage_markers = (
             ("familiar-brain ready", "brain", "Companion UI ready; loading Gemma 4 & voice..."),
             ("llama-server ready", "llama", "Gemma 4 E4B loaded; warming up voice..."),
@@ -254,9 +300,17 @@ class StackManager:
             ("Session auto-started", "ready", "Rocky is awake and listening"),
             ("Skipping robot connection", "ready", "Rocky is awake and listening"),
         )
+        stack_log = self._open_stack_log(stack_log_path)
         try:
             if proc.stdout is not None:
                 for line in proc.stdout:
+                    if stack_log is not None:
+                        try:
+                            stack_log.write(line)
+                            stack_log.flush()
+                        except OSError as exc:
+                            log.warning("stopped writing stack.log: %s", exc)
+                            stack_log = None
                     clean = line.strip()
                     if not clean:
                         continue
@@ -295,6 +349,22 @@ class StackManager:
                     self._stage = "error"
                     self._detail = f"Boot watcher error: {exc}"
                     self._updated_at = time.time()
+        finally:
+            if stack_log is not None:
+                try:
+                    stack_log.close()
+                except OSError as exc:
+                    log.warning("could not close stack.log: %s", exc)
+
+    @staticmethod
+    def _open_stack_log(path: Path | None) -> TextIO | None:
+        if path is None:
+            return None
+        try:
+            return open(path, "a", encoding="utf-8")
+        except OSError as exc:
+            log.warning("cannot open %s; stack output goes to this log only: %s", path, exc)
+            return None
 
     def sleep(self) -> dict[str, Any]:
         with self._lock:
@@ -533,7 +603,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--repo", default=str(Path(__file__).resolve().parent.parent))
     args = parser.parse_args(argv)
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
+    setup_logging(Path(args.repo))
     mgr = StackManager(repo_root=Path(args.repo), distro=args.distro, wake_port=args.wake_port)
     srv = WakeDaemonServer(mgr, host=args.host, wake_port=args.wake_port, discover_port=args.discover_port)
     srv.start()

@@ -207,3 +207,92 @@ def test_utf8_text_from_llama_server_reaches_the_client_intact(fake):
     up = Upstream(base_url=fake.base_url, generate_slot=0, brain_tool_names=set())
     evs = _events(list(up.stream({"input": [{"role": "user", "content": "hi"}], "stream": True})))
     assert [e["delta"] for e in evs if e["type"] == "response.output_text.delta"] == ["I’m sure — café."]
+
+
+# --- bounded turns: the brain answers at once and never waits long on llama ---
+
+def test_upstream_bounds_the_connect_and_each_read(fake, monkeypatch):
+    """llama-server sends no headers until its first token, so one long read used to hold
+    the turn for a minute. Connect within 5 s, then at most 15 s between reads."""
+    seen: list[object] = []
+    up = Upstream(base_url=fake.base_url, generate_slot=0, brain_tool_names=set())
+    sess = up._session()
+    orig_post = sess.post
+
+    def post(*args, **kwargs):
+        seen.append(kwargs.get("timeout"))
+        return orig_post(*args, **kwargs)
+
+    monkeypatch.setattr(sess, "post", post)
+    list(up.stream({"input": [{"role": "user", "content": "hi"}], "stream": True}))
+    up.complete({"input": [{"role": "user", "content": "hi"}]})
+    # Non-streaming (warmup probe, history compaction) gets no bytes until llama has finished,
+    # so its read keeps the old 60 s; only the streaming turn is bounded at 15 s.
+    assert seen == [(5, 15), (5, 60)]
+
+
+def test_addressed_stream_sends_headers_immediately(fake, tmp_path, monkeypatch):
+    """speech-to-speech waits on the brain's response headers, and the brain sent none
+    until llama's first token. Its first bytes now go out before any upstream work."""
+    import time
+    from familiar_brain import indexing
+    from familiar_brain.app import create_app
+    from familiar_brain.retrieval import Store
+    from tests.fakes.embedder import FakeEmbedder
+
+    monkeypatch.setattr(indexing, "open_store", lambda cfg: Store(tmp_path / "k.db", embedder=FakeEmbedder()))
+    persona = tmp_path / "persona.yaml"
+    persona.write_text("name: Understudy\naliases: [understudy]\ntts_speaker: Aiden\nmanner: dry\n"
+                       "gestures:\n  attentive: play_emotion:attentive\n")
+    cfg = tmp_path / "brain.toml"
+    cfg.write_text(f"""
+[server]
+host = "127.0.0.1"
+port = 0
+[upstream]
+base_url = "{fake.base_url}"
+generate_slot = 0
+classify_slot = 1
+classify_timeout_s = 1.0
+[gate]
+follow_up_window_s = 8
+[paths]
+persona = "{persona.as_posix()}"
+sessions_dir = "{(tmp_path / 'sessions').as_posix()}"
+[knowledge]
+db_path = "{(tmp_path / 'k.db').as_posix()}"
+notes_dir = "{(tmp_path / 'notes').as_posix()}"
+chunks_per_corpus = 3
+max_context_chars = 4800
+retention_days = 7
+""")
+    app = create_app(cfg)
+    app.config["TESTING"] = True
+    try:
+        up = app.extensions["upstream"]
+        orig_stream = up.stream
+
+        def slow_stream(req, **kwargs):
+            time.sleep(2.0)  # llama still on its first token
+            yield from orig_stream(req, **kwargs)
+
+        monkeypatch.setattr(up, "stream", slow_stream)
+        # Tracking already on and a line with no mood: an empty preface, so nothing
+        # but the brain's own first bytes can go out ahead of the upstream.
+        app.extensions["brain_state"].tracking = True
+        client = app.test_client()
+        client.post("/api/session/start")
+        start = time.monotonic()
+        resp = client.post("/v1/responses", buffered=False,
+                           json={"input": [{"role": "user", "content": "Understudy, what now?"}],
+                                 "stream": True, "tools": []})
+        chunks = iter(resp.response)
+        first = next(chunks)
+        elapsed = time.monotonic() - start
+        rest = b"".join(chunks)
+        resp.close()
+        assert first.strip(), "first chunk was empty"
+        assert elapsed < 0.5, f"first SSE bytes took {elapsed:.2f}s"
+        assert b"response.output_text.delta" in first + rest
+    finally:
+        app.extensions["close"]()

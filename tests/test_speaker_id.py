@@ -820,3 +820,219 @@ max_age_s = 15.0
         fake.close()
 
 
+
+
+def _bare_tap(tmp_path: Path) -> AudioTapProxy:
+    cfg = Speakers(enabled=True, backend="acoustic", store_path=str(tmp_path / "speakers.json"))
+    proxy = AudioTapProxy(speakers_cfg=cfg)
+    proxy.registry.profiles = {"DM": {}}
+    return proxy
+
+
+def _append_msg(seconds: float, sr: int = 16000) -> bytes:
+    pcm = (np.sin(np.linspace(0, 440 * 2 * math.pi * seconds, int(sr * seconds))) * 8000).astype("<i2")
+    return json.dumps(
+        {"type": "input_audio_buffer.append", "audio": base64.b64encode(pcm.tobytes()).decode("ascii")}
+    ).encode("utf-8")
+
+
+def test_tap_role_clears_on_streaming_miss(tmp_path):
+    # Real clients never send input_audio_buffer.commit, so a streaming miss must clear the DM label.
+    proxy = _bare_tap(tmp_path)
+    results = iter([("DM", 0.9), ("DM", 0.9)])
+    proxy.registry.match = lambda *a, **k: next(results, (None, 0.3))
+
+    async def run() -> None:
+        proxy._wake_event = asyncio.Event()
+        worker = asyncio.create_task(proxy._tap_worker())
+        state = {"sr": 16000}
+        try:
+            for _ in range(6):
+                proxy._inspect_client_text(_append_msg(0.5), state)
+                await asyncio.sleep(0.45)
+        finally:
+            worker.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await worker
+
+    asyncio.run(run())
+    assert proxy.current_state()["role"] is None
+
+
+def _stream_roles(tmp_path, results, windows: int):
+    proxy = _bare_tap(tmp_path)
+    it = iter(results)
+    proxy.registry.match = lambda *a, **k: next(it, ("DM", 0.9))
+
+    async def run() -> None:
+        proxy._wake_event = asyncio.Event()
+        worker = asyncio.create_task(proxy._tap_worker())
+        state = {"sr": 16000}
+        try:
+            for _ in range(windows):
+                proxy._inspect_client_text(_append_msg(0.5), state)
+                await asyncio.sleep(0.45)
+        finally:
+            worker.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await worker
+
+    asyncio.run(run())
+    return proxy.current_state()["role"]
+
+
+def test_one_noisy_streaming_window_keeps_the_dm_label(tmp_path):
+    # A laugh or dice clatter in one window must not drop the DM mid-turn.
+    assert _stream_roles(tmp_path, [("DM", 0.9), (None, 0.3)], windows=2) == "DM"
+
+
+def test_silent_streaming_window_keeps_the_dm_label(tmp_path):
+    # No voice in the window (conf 0): leave expiry to speakers.max_age_s.
+    assert _stream_roles(tmp_path, [("DM", 0.9), (None, 0.0), (None, 0.0)], windows=3) == "DM"
+
+
+def test_startup_tap_sync_outlasts_a_cold_stack_start():
+    # start_all.sh starts the tap only after llama (up to 600 s) and s2s (up to 240 s) are ready.
+    import inspect
+    import re
+
+    from familiar_brain import app as app_mod
+
+    src = inspect.getsource(app_mod)
+    m = re.search(r"def _sync_tap_store\(\*, attempts: int = (\d+), interval_s: float = ([\d.]+)\)", src)
+    assert m and int(m.group(1)) * float(m.group(2)) >= 900
+
+
+def test_tap_worker_survives_exception(tmp_path, caplog):
+    import logging
+
+    proxy = _bare_tap(tmp_path)
+    calls = {"n": 0}
+
+    def flaky_match(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("boom")
+        return ("DM", 0.9)
+
+    proxy.registry.match = flaky_match
+    commit = json.dumps({"type": "input_audio_buffer.commit"}).encode("utf-8")
+
+    async def run() -> bool:
+        proxy._wake_event = asyncio.Event()
+        worker = asyncio.create_task(proxy._tap_worker())
+        state = {"sr": 16000}
+        try:
+            proxy._inspect_client_text(_append_msg(1.0), state)
+            proxy._inspect_client_text(commit, state)
+            await asyncio.sleep(0.5)
+            alive = not worker.done()
+            proxy._inspect_client_text(_append_msg(1.0), state)
+            proxy._inspect_client_text(commit, state)
+            await asyncio.sleep(0.5)
+            return alive and not worker.done()
+        finally:
+            worker.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await worker
+
+    with caplog.at_level(logging.WARNING, logger="familiar.audio_tap"):
+        alive = asyncio.run(run())
+    assert alive
+    assert any(r.levelno >= logging.WARNING and "boom" in r.getMessage() + str(r.exc_info) for r in caplog.records)
+    assert calls["n"] == 2
+    assert proxy.current_state()["role"] == "DM"
+
+
+def test_tap_reads_ga_input_rate(tmp_path):
+    proxy = _bare_tap(tmp_path)
+    state = {"sr": 16000}
+    msg = {
+        "type": "session.update",
+        "session": {"type": "realtime", "audio": {"input": {"format": {"type": "audio/pcm", "rate": 24000}}}},
+    }
+    proxy._inspect_client_text(json.dumps(msg).encode("utf-8"), state)
+    assert state["sr"] == 24000
+
+
+def _capture_tap_posts(monkeypatch, *, ok_after: int = 0) -> list[dict]:
+    posts: list[dict] = []
+
+    class FakeResp:
+        status_code = 200
+        ok = True
+
+    def fake_post(self, url, *args, **kwargs):
+        if str(url).endswith("/_tap/reload"):
+            posts.append(kwargs.get("json") or {})
+            if len(posts) <= ok_after:
+                raise requests.ConnectionError("tap not up yet")
+            return FakeResp()
+        raise AssertionError(f"unexpected post {url}")
+
+    monkeypatch.setattr(requests.Session, "post", fake_post)
+    return posts
+
+
+def _speaker_app(tmp_path, monkeypatch, fake):
+    speakers_toml = f"""
+[speakers]
+enabled = true
+backend = "acoustic"
+store_path = "{(tmp_path / 'speakers.json').as_posix()}"
+tap_url = "http://127.0.0.1:{find_free_port()}"
+threshold = 0.72
+max_age_s = 3.0
+"""
+    return _make_brain_app(tmp_path, fake=fake, monkeypatch=monkeypatch, speakers_toml=speakers_toml)
+
+
+def test_notify_tap_reload_always_sends_store_path(tmp_path, monkeypatch):
+    fake = FakeLLM()
+    app = _speaker_app(tmp_path, monkeypatch, fake)
+    posts = _capture_tap_posts(monkeypatch)
+    try:
+        assert app.test_client().delete("/api/speakers/DM").status_code == 200
+        assert posts, "delete should notify the tap"
+        expected = str(app.extensions["speaker_registry"].store_path)
+        assert posts[-1].get("store_path") == expected
+    finally:
+        app.extensions["close"]()
+        fake.close()
+
+
+def test_tap_store_sync_retries_in_background_until_tap_answers(tmp_path, monkeypatch):
+    fake = FakeLLM()
+    app = _speaker_app(tmp_path, monkeypatch, fake)
+    posts = _capture_tap_posts(monkeypatch, ok_after=2)
+    try:
+        t0 = time.monotonic()
+        t = app.extensions["sync_tap_store"](attempts=10, interval_s=0.05)
+        assert time.monotonic() - t0 < 0.5, "startup sync must not block the caller"
+        assert t.daemon
+        t.join(timeout=5.0)
+        assert not t.is_alive()
+        assert len(posts) == 3, "stops retrying once the tap answers"
+        expected = str(app.extensions["speaker_registry"].store_path)
+        assert all(p.get("store_path") == expected for p in posts)
+    finally:
+        app.extensions["close"]()
+        fake.close()
+
+
+def test_tap_store_sync_gives_up_with_warning(tmp_path, monkeypatch, caplog):
+    import logging
+
+    fake = FakeLLM()
+    app = _speaker_app(tmp_path, monkeypatch, fake)
+    posts = _capture_tap_posts(monkeypatch, ok_after=100)
+    try:
+        with caplog.at_level(logging.WARNING):
+            t = app.extensions["sync_tap_store"](attempts=3, interval_s=0.01)
+            t.join(timeout=5.0)
+        assert not t.is_alive()
+        assert len(posts) == 3
+        assert any(r.levelno >= logging.WARNING and "_tap/reload" in r.getMessage() for r in caplog.records)
+    finally:
+        app.extensions["close"]()
+        fake.close()

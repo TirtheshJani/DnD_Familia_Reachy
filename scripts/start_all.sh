@@ -59,6 +59,40 @@ MODEL="${MODEL:-unsloth/gemma-4-E4B-it-qat-GGUF:UD-Q4_K_XL}"
 LAN_IP=$(ip -4 addr show 2>/dev/null | awk '/inet /{print $2}' | grep -vE '^127\.|^10\.255\.' | cut -d/ -f1 | head -1 || true)
 mkdir -p data
 
+# Every launch logs into its own run dir so a failing run's logs survive the next launch.
+# The wake daemon passes RUN_DIR so it can write the stack's stdout to stack.log beside them.
+RUN_DIR="${RUN_DIR:-data/logs/$(date +%Y%m%d-%H%M%S)}"
+RUN_NAME="$(basename "$RUN_DIR")"
+mkdir -p "$RUN_DIR"
+export RUN_DIR
+# The legacy data/<name>.log paths are hard links: Windows cannot open the WSL symlinks that
+# ln -s makes on the /mnt/c checkout. data/logs/latest is a symlink, so it works in WSL only.
+for name in llama brain s2s audio_tap robot_connect; do
+  touch "$RUN_DIR/$name.log"
+  ln -f "$RUN_DIR/$name.log" "data/$name.log" || echo "warning: could not link data/$name.log" >&2
+done
+ln -sfn "$RUN_NAME" data/logs/latest
+mapfile -t OLD_RUNS < <(ls -1d data/logs/[0-9]*-[0-9]* 2>/dev/null | sort | head -n -20)
+for old in "${OLD_RUNS[@]}"; do
+  [ "$old" = "$RUN_DIR" ] || rm -rf -- "$old" || echo "warning: could not prune $old" >&2
+done
+
+HAVE_TS=0
+if command -v ts >/dev/null 2>&1; then
+  HAVE_TS=1
+fi
+
+# Only call as `log_to <name> cmd... &`: it execs cmd, so $! is the child's own PID.
+# Appends cmd's output to $RUN_DIR/<name>.log, timestamping each line when ts is installed.
+log_to() {
+  local name=$1
+  shift
+  if [ "$HAVE_TS" = "1" ]; then
+    exec "$@" > >(ts '%Y-%m-%d %H:%M:%S' >> "$RUN_DIR/$name.log") 2>&1
+  fi
+  exec "$@" >> "$RUN_DIR/$name.log" 2>&1
+}
+
 PIDS=()
 CLEANED_UP=0
 
@@ -68,13 +102,23 @@ cleanup() {
   fi
   CLEANED_UP=1
   echo "stopping children"
-  for pid in "${PIDS[@]:-}"; do
+  # s2s runs under the respawn loop, so stop the loop's own child too: a slow s2s exit
+  # must not outlive the loop and keep the GPU and the port.
+  local targets="${PIDS[*]:-}"
+  # The loop records its current s2s, so a stop that TERMs the loop and this shell together
+  # still reaches an s2s that ignores TERM after the loop is gone.
+  targets="$targets $(cat "${RUN_DIR:-/nonexistent}/s2s.pid" 2>/dev/null || true)"
+  if [ -n "${S2S_PID:-}" ] && command -v pgrep >/dev/null 2>&1; then
+    targets="$targets $(pgrep -P "$S2S_PID" 2>/dev/null | tr '
+' ' ' || true)"
+  fi
+  for pid in $targets; do
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
       kill -TERM "$pid" 2>/dev/null || true
     fi
   done
   sleep 0.3
-  for pid in "${PIDS[@]:-}"; do
+  for pid in $targets; do
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
       kill -KILL "$pid" 2>/dev/null || true
     fi
@@ -133,21 +177,22 @@ else
   S2S_PORT="8765"
 fi
 
+TAP_PID=""
+
 # Launch llama-server, familiar-brain, and speech-to-speech IN PARALLEL so Companion UI opens
 # in ~12-15s while Gemma 4 and Parakeet+Kokoro load concurrently (~55-65s faster cold boot).
-"$LLAMA_BIN" -hf "$MODEL" ${MMPROJ_ARGS:---mmproj-auto} \
+log_to llama "$LLAMA_BIN" -hf "$MODEL" ${MMPROJ_ARGS:---mmproj-auto} \
   -np 2 -c 32768 -fa on -ctk q8_0 -ctv q8_0 --swa-full \
   --jinja --reasoning off --reasoning-effort none \
-  --port 8080 --host 127.0.0.1 \
-  > data/llama.log 2>&1 &
+  --port 8080 --host 127.0.0.1 &
 LLAMA_PID=$!
 PIDS+=("$LLAMA_PID")
 
 export FAMILIAR_WARMUP_LLM="${FAMILIAR_WARMUP_LLM:-1}"
 if [ -x "$UV_PROJECT_ENVIRONMENT/bin/familiar-brain" ]; then
-  "$UV_PROJECT_ENVIRONMENT/bin/familiar-brain" serve config/brain.toml > data/brain.log 2>&1 &
+  log_to brain "$UV_PROJECT_ENVIRONMENT/bin/familiar-brain" serve config/brain.toml &
 else
-  uv run --project "$REPO" familiar-brain serve config/brain.toml > data/brain.log 2>&1 &
+  log_to brain uv run --project "$REPO" familiar-brain serve config/brain.toml &
 fi
 BRAIN_PID=$!
 PIDS+=("$BRAIN_PID")
@@ -165,33 +210,73 @@ S2S_ARGS=(
   --responses_api_stream
   --enable_live_transcription
   --thresh 0.6 --chat_size 12
-  --max_speech_ms 25000 --smart_turn_max_wait_ms 1200 --unanswered_reopen_ms 1500
+  --smart_turn_max_wait_ms 1200 --unanswered_reopen_ms 1500
 )
 
 # Run through scripts/run_s2s.py to bound VAD speculative turns and guard Kokoro voice overrides.
-if [ -x "$S2S_VENV/bin/python" ]; then
-  "$S2S_VENV/bin/python" "$REPO/scripts/run_s2s.py" "${S2S_ARGS[@]}" > data/s2s.log 2>&1 &
-else
-  "$S2S_VENV/bin/speech-to-speech" "${S2S_ARGS[@]}" > data/s2s.log 2>&1 &
-fi
+# s2s stamps its own log lines, so it is not piped through ts.
+# The loop restarts a dead or wedged s2s (run_s2s.py exits 70 on a stuck pool) up to
+# 5 times per 10 minutes. S2S_RESPAWN=0 turns it off.
+S2S_RESPAWN="${S2S_RESPAWN:-1}"
+s2s_note() {
+  echo "$*" >&2
+  echo "$*" >> "$RUN_DIR/s2s.log"
+}
+s2s_loop() {
+  local child="" rc now t
+  local -a restarts=() recent=()
+  trap 'if [ -n "$child" ]; then kill -TERM "$child" 2>/dev/null; fi; exit 143' TERM
+  while true; do
+    if [ -x "$S2S_VENV/bin/python" ]; then
+      "$S2S_VENV/bin/python" "$REPO/scripts/run_s2s.py" "${S2S_ARGS[@]}" >> "$RUN_DIR/s2s.log" 2>&1 &
+    else
+      "$S2S_VENV/bin/speech-to-speech" "${S2S_ARGS[@]}" >> "$RUN_DIR/s2s.log" 2>&1 &
+    fi
+    child=$!
+    echo "$child" > "$RUN_DIR/s2s.pid"
+    rc=0
+    wait "$child" || rc=$?
+    child=""
+    rm -f "$RUN_DIR/s2s.pid"
+    if [ "$S2S_RESPAWN" != "1" ]; then
+      s2s_note "speech-to-speech exited with code $rc; not restarting (S2S_RESPAWN=$S2S_RESPAWN)"
+      exit "$rc"
+    fi
+    now=$SECONDS
+    recent=()
+    for t in "${restarts[@]}"; do
+      if [ $((now - t)) -lt 600 ]; then
+        recent+=("$t")
+      fi
+    done
+    restarts=("${recent[@]}")
+    if [ "${#restarts[@]}" -ge 5 ]; then
+      s2s_note "speech-to-speech exited with code $rc; already restarted 5 times in 10 minutes, giving up"
+      exit "$rc"
+    fi
+    restarts+=("$now")
+    s2s_note "speech-to-speech exited with code $rc; restarting (${#restarts[@]} of 5 in 10 minutes)"
+    sleep 1
+  done
+}
+s2s_loop &
 S2S_PID=$!
 PIDS+=("$S2S_PID")
 
 # Wait for familiar-brain first so Wake Daemon can open the Companion UI right away (~15s).
-wait_for http://127.0.0.1:8090/api/state familiar-brain data/brain.log "$BRAIN_PID" 120
-wait_for http://127.0.0.1:8080/health llama-server data/llama.log "$LLAMA_PID" 600
-wait_for "http://127.0.0.1:${S2S_PORT}/v1/pool" speech-to-speech data/s2s.log "$S2S_PID" 240
+wait_for http://127.0.0.1:8090/api/state familiar-brain "$RUN_DIR/brain.log" "$BRAIN_PID" 120
+wait_for http://127.0.0.1:8080/health llama-server "$RUN_DIR/llama.log" "$LLAMA_PID" 600
+wait_for "http://127.0.0.1:${S2S_PORT}/v1/pool" speech-to-speech "$RUN_DIR/s2s.log" "$S2S_PID" 240
 
 if [ "$AUDIO_TAP_ACTIVE" = "1" ]; then
-  "$BRAIN_PY" -m familiar_brain.audio_tap \
+  log_to audio_tap "$BRAIN_PY" -m familiar_brain.audio_tap \
     --listen-host 0.0.0.0 --listen-port 8765 \
     --upstream-host 127.0.0.1 --upstream-port 8766 \
     --control-host 127.0.0.1 --control-port 8767 \
-    --config config/brain.toml \
-    > data/audio_tap.log 2>&1 &
+    --config config/brain.toml &
   TAP_PID=$!
   PIDS+=("$TAP_PID")
-  wait_for http://127.0.0.1:8765/v1/pool audio-tap data/audio_tap.log "$TAP_PID" 60
+  wait_for http://127.0.0.1:8765/v1/pool audio-tap "$RUN_DIR/audio_tap.log" "$TAP_PID" 60
 fi
 
 WARMUP_LLM_JSON=false
@@ -216,7 +301,7 @@ else
   if [ -n "${LAN_IP:-}" ]; then
     ROBOT_ARGS+=(--host-ip "$LAN_IP")
   fi
-  "$BRAIN_PY" "$REPO/scripts/robot_connect.py" "${ROBOT_ARGS[@]}" --port 8765
+  "$BRAIN_PY" -u "$REPO/scripts/robot_connect.py" "${ROBOT_ARGS[@]}" --port 8765 2>&1 | tee -a "$RUN_DIR/robot_connect.log"
 fi
 
 if [ "$AUTO_SESSION" = "1" ]; then
@@ -225,4 +310,29 @@ else
   echo "Start a session: curl -X POST http://127.0.0.1:8090/api/session/start"
 fi
 
-wait
+# Stay up while every long-lived child is up (robot_connect.py above is one-shot and has
+# already finished). When one exits, say which, stop the rest and exit non-zero so the wake
+# daemon shows an error instead of ready.
+LONG_PIDS=("$LLAMA_PID" "$BRAIN_PID" "$S2S_PID")
+if [ -n "$TAP_PID" ]; then
+  LONG_PIDS+=("$TAP_PID")
+fi
+DEAD_PID=""
+rc=0
+wait -n -p DEAD_PID "${LONG_PIDS[@]}" || rc=$?
+if [ "$CLEANED_UP" = "1" ]; then
+  exit "$rc"  # the stack was stopped by a signal
+fi
+case "$DEAD_PID" in
+  "$LLAMA_PID") dead_name=llama-server; dead_log="$RUN_DIR/llama.log" ;;
+  "$BRAIN_PID") dead_name=familiar-brain; dead_log="$RUN_DIR/brain.log" ;;
+  "$S2S_PID")   dead_name=speech-to-speech; dead_log="$RUN_DIR/s2s.log" ;;
+  "${TAP_PID:-none}") dead_name=audio-tap; dead_log="$RUN_DIR/audio_tap.log" ;;
+  *)            dead_name="unknown child (pid ${DEAD_PID:-?})"; dead_log="" ;;
+esac
+echo "$dead_name exited with code $rc; stopping the stack" >&2
+if [ -n "$dead_log" ]; then
+  echo "tail of $dead_log:" >&2
+  tail -n 30 "$dead_log" >&2 || true
+fi
+exit 1
