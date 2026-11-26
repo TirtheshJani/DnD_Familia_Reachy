@@ -1166,3 +1166,11 @@ New tests: `test_app_js_has_no_undeclared_state_refs`,
 `test_companion_plus_handles_missing_familiar_routes` and `test_mute_stop_publishes_state`
 in `tests/test_companion_ui.py`; `test_campaign_switch_keeps_session_active` and
 `test_robot_reconnect_route_reaches_native_app` in `tests/test_native_robot_and_profiles.py`.
+
+Review fixes (same day): the 5 s fetch abort is now opt-in (`apiJson(url, { timeoutMs })`) and
+only the `/api/state` and `/api/sessions` polls pass it. Before this, every UI action aborted at
+5 s, so the official-app Reconnect and speaker enroll showed "timed out" while the server kept
+working, and a retry started a second robot connect. Native Reconnect now prefers the launcher's
+`ROBOT_HOST` over the heartbeat's hardcoded `reachy-mini.local`, which WSL2 often cannot resolve.
+New test: `test_native_reconnect_prefers_launcher_robot_host`; `test_app_js_poll_cannot_wedge_and_good_poll_clears_banner`
+now pins the opt-in timeout.

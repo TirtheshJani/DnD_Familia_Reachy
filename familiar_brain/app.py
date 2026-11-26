@@ -1287,7 +1287,9 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
             if native:
                 robot_state["mode"] = "native"
                 robot_state["disabled"] = False
-                native_host = req_host or robot_state.get("host") or "reachy-mini.local"
+                # WSL2 often cannot resolve .local; launch.ps1 resolves the robot into ROBOT_HOST.
+                native_host = (req_host or os.environ.get("ROBOT_HOST")
+                               or robot_state.get("host") or "reachy-mini.local")
         if native:
             # The native app owns the audio link; only its :8043 route can restart it.
             url = f"http://{native_host}:8043/_familiar/reconnect-audio"

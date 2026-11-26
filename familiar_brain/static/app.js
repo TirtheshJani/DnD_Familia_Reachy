@@ -90,18 +90,19 @@
       init.headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(options.body);
     }
-    // A hung request would leave pollInFlight set forever and freeze every later poll.
+    // Polls pass timeoutMs: a hung request would leave pollInFlight set forever and freeze
+    // every later poll. Actions pass none, since Reconnect and enroll can take longer.
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 5000);
+    const timer = options.timeoutMs ? setTimeout(() => controller.abort(), options.timeoutMs) : null;
     init.signal = controller.signal;
     let resp;
     try {
       resp = await fetch(url, init);
     } catch (err) {
-      if (err && err.name === "AbortError") throw new Error("Request timed out after 5 s");
+      if (err && err.name === "AbortError") throw new Error(`Request timed out after ${options.timeoutMs / 1000} s`);
       throw err;
     } finally {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
     }
     let data = {};
     try {
@@ -371,7 +372,7 @@
     if (pollInFlight) return;
     pollInFlight = true;
     try {
-      const state = await apiJson("/api/state");
+      const state = await apiJson("/api/state", { timeoutMs: 5000 });
       applyState(state);
       if (brainErrorShown) {
         brainErrorShown = false;
@@ -388,7 +389,7 @@
 
   async function refreshSessions() {
     try {
-      const data = await apiJson("/api/sessions");
+      const data = await apiJson("/api/sessions", { timeoutMs: 5000 });
       renderSessions(data.sessions || []);
     } catch (err) {
       showBanner(`Could not list sessions: ${err.message}`, "error");

@@ -375,9 +375,12 @@ def test_app_js_poll_cannot_wedge_and_good_poll_clears_banner() -> None:
     api_body = _js_function_body(js, "async function apiJson")
     # A hung fetch must abort so refreshState's finally clears pollInFlight.
     assert "AbortController" in api_body
-    assert "5000" in api_body
     refresh_body = _js_function_body(js, "async function refreshState")
+    assert re.search(r'apiJson\("/api/state",\s*\{\s*timeoutMs:\s*5000', refresh_body)
     assert "hideBanner" in refresh_body
+    # Only the poll is capped: slow actions (official-app Reconnect, enroll) must not abort at 5 s.
+    assert "5000" not in api_body
+    assert "timeoutMs" in api_body
 
 
 def test_companion_plus_handles_missing_familiar_routes() -> None:

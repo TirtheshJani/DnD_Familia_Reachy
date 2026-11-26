@@ -80,6 +80,7 @@ def native_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     cfg = _write_min_config(tmp_path)
     monkeypatch.setenv("FAMILIAR_ROBOT_MODE", "native")
     monkeypatch.delenv("FAMILIAR_NO_ROBOT", raising=False)
+    monkeypatch.delenv("ROBOT_HOST", raising=False)
     monkeypatch.setenv("FAMILIAR_EMBEDDER", "deterministic")
     with patch("familiar_brain.indexing.open_store") as mock_open:
         store = Store(tmp_path / "data" / "knowledge.sqlite", embedder=make_embedder("deterministic"))
@@ -290,3 +291,23 @@ def test_robot_reconnect_route_reaches_native_app(native_app, monkeypatch: pytes
     assert resp.get_json()["ok"] is True
     # The native app restarts its audio link only when its :8043 route is called.
     assert calls == ["http://reachy-mini.local:8043/_familiar/reconnect-audio"]
+
+
+def test_native_reconnect_prefers_launcher_robot_host(native_app, monkeypatch: pytest.MonkeyPatch):
+    # WSL2 often cannot resolve .local names; launch.ps1 resolves the robot and exports ROBOT_HOST.
+    import requests
+
+    calls: list[str] = []
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"ok": True}
+
+    monkeypatch.setenv("ROBOT_HOST", "10.0.0.77")
+    monkeypatch.setattr(requests.Session, "post", lambda self, url, *a, **k: calls.append(str(url)) or _Resp())
+    resp = native_app.test_client().post("/api/robot/reconnect", json={})
+    assert resp.status_code == 200
+    assert calls == ["http://10.0.0.77:8043/_familiar/reconnect-audio"]
