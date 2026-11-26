@@ -982,3 +982,79 @@ and `test_a_session_summary_fact_is_still_retrievable_once_a_campaign_memory_exi
 `test_it_is_indexed_in_sessions_under_its_own_source_at_the_top_weight` is renamed
 `..._just_above_a_summary` and checks 1.6. `tests/fakes/llm_server.py` can now script
 `finish_reason`.
+
+## P20. Every launch keeps its logs (2026-11-26)
+
+The run on 2026-11-25 left four empty logs: `start_all.sh` truncated `data/*.log` with `>`
+on every launch, and the wake daemon's own log went to a `pythonw.exe` stderr nobody sees.
+
+- **Per-run log dirs** (`scripts/start_all.sh`). Each launch makes
+  `data/logs/<YYYYmmdd-HHMMSS>/` and appends `llama.log`, `brain.log`, `s2s.log`,
+  `audio_tap.log` and `robot_connect.log` there with `>>`. `RUN_DIR` is exported to the
+  children. The old `data/<name>.log` paths are hard links (`ln -f`) to the newest run's
+  files, so the docs, the `wait_for` tails, Windows editors and `familiar-brain gate-report`
+  run from the Windows checkout still work. `data/logs/latest` is a symlink to the newest
+  run dir and works inside WSL only: on the `/mnt/c` checkout DrvFs stores `ln -s` links as
+  WSL symlinks that Windows cannot open. All five files are created up front before
+  linking. Only the newest 20 run dirs are kept; a run dir that cannot be deleted (for
+  example a file held open on Windows) prints a warning and the launch carries on.
+  `robot_connect.py` used to print to the terminal only; it now runs with `python -u`
+  through `tee -a` so the terminal still shows each line as it happens.
+- **Timestamps only where `ts` exists.** llama, brain and audio-tap are launched through a
+  small `log_to` helper that `exec`s the child, so `$!` is still the child's own PID and the
+  cleanup still kills it. When `ts` (moreutils) is installed their lines are stamped through
+  a process substitution; s2s stamps its own lines and is not piped. `ts` is not installed
+  in TJ's WSL, so on the laptop no prefix is added today.
+- **Wake daemon log file** (`familiar_brain/wake_daemon.py`). New `setup_logging(repo_root)`
+  adds a `RotatingFileHandler` at `data/logs/wake_daemon.log` (5 MB x 3); `main()` calls it
+  after `basicConfig`. The `[stack] ...` lines it already logged now land there too.
+- **How `stack.log` gets its path.** The daemon runs on Windows and starts the stack with
+  `wsl -d <distro> -e bash -lc "... ./scripts/start_all.sh ..."`, so it cannot read a
+  `RUN_DIR` chosen inside WSL afterwards. Instead `_default_spawn` picks the run name
+  itself, creates `<repo>/data/logs/<name>/` from Windows, and passes
+  `RUN_DIR='data/logs/<name>'` in the bash command; `start_all.sh` uses a `RUN_DIR` it is
+  given (`RUN_DIR="${RUN_DIR:-data/logs/$(date ...)}"`). The boot watcher appends every
+  stdout line it reads to that dir's `stack.log`. `wake()` reads that path under its lock
+  and hands it to the watcher thread, so a quick sleep and wake cannot send one run's
+  output to the next run's `stack.log`. A failure to open, write or close it logs a
+  WARNING and the watcher carries on. A spawn failure in `wake()` now also logs a WARNING;
+  it set the error state silently before.
+
+Deviation from the plan text: the plan says `ln -sfn` for the legacy `data/<name>.log`
+links. Those symlinks broke reading the logs from Windows (PowerShell `Get-Content` failed
+and Windows Python raised `OSError: [WinError 1920]`, which crashed `gate-report`), so they
+are hard links instead. This was checked by running `start_all.sh` twice with stubs from a
+copy under `/mnt/c`, then reading `data\brain.log` and running `gate-report` on it from
+Windows. Only `latest` is still made with `ln -sfn`.
+
+Second deviation: the plan says to append the stack's stdout to
+`$RUN_DIR/stack.log` from `wake_daemon.py`; since `RUN_DIR` is not visible to Windows,
+the daemon chooses it and hands it to `start_all.sh`, as above. Stack runs started by hand
+from a terminal have no `stack.log` (their output is on the terminal). Five tests were
+added beyond the plan's two: 20-dir pruning, a run dir that cannot be pruned, a given
+`RUN_DIR`, `ts`, and the watcher keeping its own run's `stack.log`.
+
+`start_all.sh` was checked by running it in WSL with stub binaries (stub `curl` so no real
+port is probed): twice in a row for two run dirs, once with a stub `ts` and long-running
+stubs to confirm every child is still killed on TERM with no orphans, and once through to
+`robot_connect.py`. Not run on the real robot or with the real llama, brain or s2s; the
+wake daemon was not run under `pythonw.exe`.
+
+Known side effect, not changed here (it needs a change outside this task's files): the
+existing e2e tests in
+`tests/e2e/test_tier1_happy_paths.py` run `scripts/start_all.sh` with stubs inside the repo
+itself, so one full `uv run pytest` adds about 10 run dirs under `data/logs/` (before this
+change it truncated `data/*.log` instead). Two full suite runs after a session would push
+that session's run dir out of the newest 20. Copy a session's run dir somewhere safe
+before running the full suite in the main checkout.
+
+New tests: `test_start_all_keeps_previous_run_logs`,
+`test_start_all_prunes_all_but_the_newest_20_run_dirs`,
+`test_start_all_still_launches_when_an_old_run_dir_cannot_be_pruned`,
+`test_start_all_uses_the_run_dir_it_is_given` and
+`test_start_all_timestamps_child_lines_when_ts_is_installed` in
+`tests/test_start_all_logs.py` (skipped on Windows, run in WSL);
+`test_wake_daemon_logs_to_file` and
+`test_wake_daemon_logs_stack_output_to_run_dir_stack_log` and
+`test_wake_daemon_watcher_keeps_the_stack_log_of_its_own_run` in
+`tests/test_wake_and_reachy_app.py`.
