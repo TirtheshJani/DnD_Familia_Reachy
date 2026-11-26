@@ -7,6 +7,9 @@ In speech-to-speech 1.0.0:
 2. LMOutputProcessor.process never commits speculative_turns when an LLM response
    contains only tool calls (e.g. idle_do_nothing on IGNORE turns) and no TTSInput,
    leaving every IGNORE turn uncommitted forever.
+3. Chat.has_pending_tool_calls refuses every later LLM request while any function_call
+   lacks its output, with no timeout, so one robot gesture result the app never sends
+   silences the familiar until reconnect.
 
 This wrapper applies surgical runtime guards before launching speech_to_speech.cli.main().
 """
@@ -24,6 +27,9 @@ logger = logging.getLogger("run_s2s")
 DEFAULT_MAX_TURN_AUDIO_S = 30.0
 DEFAULT_MAX_TURN_REVISIONS = 8
 KOKORO_VOICE_RE = re.compile(r"^[abefhijpz][fm]_[a-z][a-z0-9_]*$")
+# Robot-side tools that only move Rocky (robot_profile/familiar/profile.md, app.py
+# GESTURE_TOOLS). An unanswered call to one of these must not block later turns.
+ROBOT_GESTURE_TOOLS = frozenset({"play_emotion", "stop_emotion", "head_tracking", "move_head", "idle_do_nothing"})
 
 
 def _env_float(name: str, default: float) -> float:
@@ -158,6 +164,31 @@ def patch_lm_output_processor(lm_proc_cls: type[Any]) -> bool:
     return True
 
 
+def patch_chat_pending_tools(chat_cls: type[Any]) -> bool:
+    """Let later turns generate while only robot gesture calls await their output.
+
+    Chat.has_pending_tool_calls is the gate every LLM request and response.create checks.
+    A gesture needs no reply and the app may never send its result, so it must not hold
+    the conversation. Its late output is still accepted by append_tool_output.
+    """
+    if getattr(chat_cls.has_pending_tool_calls, "_familiar_pending_patched", False):
+        return False
+
+    orig_has_pending = chat_cls.has_pending_tool_calls
+
+    @functools.wraps(orig_has_pending)
+    def has_blocking_pending_tool_calls(self: Any) -> bool:
+        with self._lock:
+            return any(
+                getattr(fc, "name", None) not in ROBOT_GESTURE_TOOLS
+                for fc in self._pending_tool_calls.values()
+            )
+
+    has_blocking_pending_tool_calls._familiar_pending_patched = True  # type: ignore[attr-defined]
+    chat_cls.has_pending_tool_calls = has_blocking_pending_tool_calls
+    return True
+
+
 def is_valid_kokoro_voice(voice: str | None) -> bool:
     return bool(voice and KOKORO_VOICE_RE.match(voice.strip()))
 
@@ -222,6 +253,7 @@ def apply_s2s_patches(
     max_turn_audio_s: float | None = None,
     max_turn_revisions: int | None = None,
 ) -> None:
+    from speech_to_speech.LLM.chat import Chat  # type: ignore[import-not-found]
     from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor  # type: ignore[import-not-found]
     from speech_to_speech.TTS.kokoro_handler import KokoroTTSHandler  # type: ignore[import-not-found]
     from speech_to_speech.VAD.vad_handler import VADHandler  # type: ignore[import-not-found]
@@ -232,6 +264,7 @@ def apply_s2s_patches(
         max_turn_revisions=max_turn_revisions,
     )
     patch_lm_output_processor(LMOutputProcessor)
+    patch_chat_pending_tools(Chat)
     patch_kokoro_voice_guard(KokoroTTSHandler)
 
 

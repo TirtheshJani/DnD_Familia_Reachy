@@ -233,3 +233,50 @@ def test_real_s2s_vad_and_lm_processor_bound_continuous_speech(monkeypatch: pyte
     list(proc.process(EndOfResponse(turn_id="turn_ignore", turn_revision=0)))
     assert tracker.is_committed("turn_ignore", 0) is True
     assert getattr(KokoroTTSHandler._process_kokoro, "_familiar_voice_guard_patched", False) is True
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("speech_to_speech") is None,
+    reason="speech_to_speech package only installed in WSL2 s2s venv",
+)
+def test_unanswered_gesture_call_does_not_block_next_turn() -> None:
+    from openai.types.realtime.conversation_item import (
+        RealtimeConversationItemFunctionCall,
+        RealtimeConversationItemFunctionCallOutput,
+        RealtimeConversationItemUserMessage,
+    )
+    from speech_to_speech.LLM.chat import Chat
+
+    run_s2s.apply_s2s_patches()
+
+    def user(text: str) -> RealtimeConversationItemUserMessage:
+        return RealtimeConversationItemUserMessage(
+            type="message", role="user", content=[{"type": "input_text", "text": text}]
+        )
+
+    def call(name: str, call_id: str) -> RealtimeConversationItemFunctionCall:
+        return RealtimeConversationItemFunctionCall(
+            type="function_call", name=name, call_id=call_id, arguments="{}"
+        )
+
+    chat = Chat(size=10)
+    chat.add_item(user("Rocky, the dragon is here"))
+    # The pipeline records an LLM-emitted call this way (language_model.py).
+    chat.add_ordered_function_call(call("play_emotion", "call_x"))
+    chat.add_item(user("Rocky, what do we do"))
+    assert chat.has_pending_tool_calls() is False
+    # The realtime handler checks a copy of the chat before response.create.
+    assert chat.copy(deep=True).has_pending_tool_calls() is False
+
+    blocked = Chat(size=10)
+    blocked.add_item(user("Rocky, look at this"))
+    blocked.add_ordered_function_call(call("camera", "call_cam"))
+    assert blocked.has_pending_tool_calls() is True
+
+    # The app's late result for the gesture is still accepted.
+    chat.add_item(
+        RealtimeConversationItemFunctionCallOutput(
+            type="function_call_output", call_id="call_x", output='{"status":"ok"}'
+        )
+    )
+    assert chat.has_pending_tool_calls() is False

@@ -1058,3 +1058,58 @@ New tests: `test_start_all_keeps_previous_run_logs`,
 `test_wake_daemon_logs_stack_output_to_run_dir_stack_log` and
 `test_wake_daemon_watcher_keeps_the_stack_log_of_its_own_run` in
 `tests/test_wake_and_reachy_app.py`.
+
+## P21. An unanswered gesture call no longer blocks s2s (2026-11-26)
+
+speech-to-speech 1.0.0 refuses every LLM request and every `response.create` while any
+`function_call` in the chat lacks its `function_call_output`, with no timeout. The brain
+sends a gesture preface or `idle_do_nothing` on nearly every turn, and the app drops its
+tool result when `response.done` takes over 30 s, so one slow reply could leave a call
+pending for good: transcription kept arriving and nothing answered until reconnect.
+
+- **`patch_chat_pending_tools(Chat)`** (`scripts/run_s2s.py`, applied from
+  `apply_s2s_patches()`). The patched `Chat.has_pending_tool_calls()` holds `self._lock`,
+  as the original does, and returns True only for a pending call whose name is not in the
+  new `ROBOT_GESTURE_TOOLS` (`play_emotion`, `stop_emotion`, `head_tracking`, `move_head`,
+  `idle_do_nothing`). A pending `camera` call still blocks, because its output is the frame
+  the next reply needs. Every gate in the installed s2s calls this one method:
+  `base_openai_compatible_language_model.py` lines 943 and 1069, `language_model.py` line
+  605, and `api/openai_realtime/handlers/response.py` lines 180 (tool follow-up prefetch)
+  and 753 (`response.create`, on a copy of the chat, which is the same class). The late
+  output for a gesture still goes through the unchanged `append_tool_output`, which
+  re-injects the call when it is no longer in the buffer.
+- **Tool names checked.** The set matches the brain's `GESTURE_TOOLS` in
+  `familiar_brain/app.py`, the names the brain emits (`responses_api.IDLE_TOOL`,
+  `motion.py`, `attention.py`), and the robot's `default_tools` in
+  `robot_profile/familiar/profile.md` and `reachy_familiar/audio_bridge.py`.
+
+Deviation from the plan text: the plan also says to answer non-addressed turns at
+`app.py` with `empty_response_events()` instead of `idle_do_nothing`, with a test
+`test_ignored_turn_sends_no_tool_call`. That item was skipped, because it is wrong as
+written. In s2s 1.0.0 a turn is committed only by TTS output or by an assistant output
+part (text or tool call): `on_assistant_output` in `handlers/response.py` and the existing
+`patch_lm_output_processor`. An empty response commits nothing, so every ignored turn
+would stay open and the next utterance within `unanswered_reopen_ms` would be merged into
+it as a revision, which is the bug `idle_do_nothing` and point 2 of the `run_s2s.py` docstring
+exist to prevent. Checked against the real s2s in WSL: after `apply_s2s_patches()` an
+`idle_do_nothing` response left `is_committed` True and an empty response left it False.
+With the s2s patch above the pending `idle_do_nothing` no longer blocks anything, so the
+app change is not needed for the stall. It would also have broken about 30 existing tests
+that expect `idle_do_nothing` on ignored turns. `app.py` and `tests/test_app_integration.py`
+are unchanged.
+
+Known edge cases left as they are (review, not fixed tonight). s2s still drops an unpaired
+ordered gesture call, and everything after it up to the next user message, when it builds
+the next request (`Chat._drop_unpaired_ordered_turns_locked`). So if a gesture result never
+arrives, that one reply is missing from the history the brain sees. And if the app sends a
+camera result and `response.create` while the preface gesture's result is still pending,
+the camera call is stripped too and the frame is lost for that turn. Both are far milder
+than the permanent silence they replace; watch for the camera case in Task 10. Gesture
+calls that never get an output also stay in `Chat._pending_tool_calls` for the whole
+session, a few small objects per dropped result.
+
+Not run on the real robot or with the real app; the patch was exercised against the
+installed speech_to_speech 1.0.0 `Chat` in WSL only.
+
+New test: `test_unanswered_gesture_call_does_not_block_next_turn` in
+`tests/test_run_s2s.py` (skipped on Windows, run in WSL against the real s2s).
