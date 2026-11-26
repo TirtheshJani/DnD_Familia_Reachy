@@ -1215,3 +1215,13 @@ New tests in `tests/test_speaker_id.py`: `test_tap_role_clears_on_streaming_miss
 `test_notify_tap_reload_always_sends_store_path`,
 `test_tap_store_sync_retries_in_background_until_tap_answers` and
 `test_tap_store_sync_gives_up_with_warning`.
+
+Review fixes (same day): the startup store sync now retries for up to 15 minutes (900 x 1 s).
+`start_all.sh` starts the tap only after llama (up to 600 s cold) and s2s (up to 240 s) are
+ready, so the 30 s version always gave up first and the tap kept reading `data/speakers.json`.
+The streaming match now clears the label only after two misses in a row that contain a voice
+(conf above 0); a silent window leaves expiry to `speakers.max_age_s`. With a single miss
+clearing it, one laugh or dice clatter during the DM's narration dropped the DM label, and the
+gate then answered the DM inside an open follow-up window. Commits (the rare explicit path) still
+clear on the first miss. New tests: `test_one_noisy_streaming_window_keeps_the_dm_label`,
+`test_silent_streaming_window_keeps_the_dm_label`, `test_startup_tap_sync_outlasts_a_cold_stack_start`.

@@ -190,6 +190,7 @@ class AudioTapProxy:
         self._utt_samples = 0
         self._samples_since_match = 0
         self._last_match_at = 0.0
+        self._stream_misses = 0
 
         self._capturing = False
         self._capture_chunks: list[np.ndarray] = []
@@ -247,7 +248,7 @@ class AudioTapProxy:
         if self._wake_event is not None:
             self._wake_event.set()
 
-    async def _run_match(self, audio: np.ndarray, *, clear_on_miss: bool) -> None:
+    async def _run_match(self, audio: np.ndarray, *, clear_on_miss: bool, misses_to_clear: int = 1) -> None:
         if len(audio) < 400 or not self.registry.profiles:
             if clear_on_miss:
                 self._current = {"role": None, "confidence": None, "updated_at": time.time()}
@@ -264,12 +265,21 @@ class AudioTapProxy:
             return
         now = time.time()
         if role is not None and role in self.registry.profiles:
+            self._stream_misses = 0
             self._current = {
                 "role": role,
                 "confidence": round(float(conf), 4),
                 "updated_at": now,
             }
         elif clear_on_miss:
+            if misses_to_clear > 1:
+                # Streaming: a silent window (conf 0) leaves expiry to max_age_s, and one noisy
+                # window (a laugh, dice) must not drop the DM mid-turn; clear on repeated misses.
+                if conf <= 0:
+                    return
+                self._stream_misses += 1
+                if self._stream_misses < misses_to_clear:
+                    return
             self._current = {
                 "role": None,
                 "confidence": round(float(conf), 4) if conf > 0 else None,
@@ -326,8 +336,8 @@ class AudioTapProxy:
                 buf = buf[-(TARGET_SAMPLE_RATE * 3):]
             self._samples_since_match = 0
             self._last_match_at = time.monotonic()
-            # Clients never send commit, so a miss must clear the label or the DM sticks.
-            await self._run_match(buf, clear_on_miss=True)
+            # Clients never send commit, so repeated misses must clear the label or the DM sticks.
+            await self._run_match(buf, clear_on_miss=True, misses_to_clear=2)
 
     def _inspect_client_text(self, payload: bytes, state: dict[str, int]) -> None:
         if b'"input_audio_buffer.' not in payload and b'"session.update"' not in payload:

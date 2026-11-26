@@ -377,7 +377,7 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
             app.logger.warning("tap /_tap/reload failed (%s); tap may hold stale speakers", detail)
         return False
 
-    def _sync_tap_store(*, attempts: int = 30, interval_s: float = 1.0) -> threading.Thread | None:
+    def _sync_tap_store(*, attempts: int = 900, interval_s: float = 1.0) -> threading.Thread | None:
         """At startup the tap may not be up yet. Retry in a daemon thread so brain startup and
         request threads never wait on it; stop as soon as the tap answers."""
         if not cfg.speakers.enabled:

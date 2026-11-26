@@ -859,6 +859,50 @@ def test_tap_role_clears_on_streaming_miss(tmp_path):
     assert proxy.current_state()["role"] is None
 
 
+def _stream_roles(tmp_path, results, windows: int):
+    proxy = _bare_tap(tmp_path)
+    it = iter(results)
+    proxy.registry.match = lambda *a, **k: next(it, ("DM", 0.9))
+
+    async def run() -> None:
+        proxy._wake_event = asyncio.Event()
+        worker = asyncio.create_task(proxy._tap_worker())
+        state = {"sr": 16000}
+        try:
+            for _ in range(windows):
+                proxy._inspect_client_text(_append_msg(0.5), state)
+                await asyncio.sleep(0.45)
+        finally:
+            worker.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await worker
+
+    asyncio.run(run())
+    return proxy.current_state()["role"]
+
+
+def test_one_noisy_streaming_window_keeps_the_dm_label(tmp_path):
+    # A laugh or dice clatter in one window must not drop the DM mid-turn.
+    assert _stream_roles(tmp_path, [("DM", 0.9), (None, 0.3)], windows=2) == "DM"
+
+
+def test_silent_streaming_window_keeps_the_dm_label(tmp_path):
+    # No voice in the window (conf 0): leave expiry to speakers.max_age_s.
+    assert _stream_roles(tmp_path, [("DM", 0.9), (None, 0.0), (None, 0.0)], windows=3) == "DM"
+
+
+def test_startup_tap_sync_outlasts_a_cold_stack_start():
+    # start_all.sh starts the tap only after llama (up to 600 s) and s2s (up to 240 s) are ready.
+    import inspect
+    import re
+
+    from familiar_brain import app as app_mod
+
+    src = inspect.getsource(app_mod)
+    m = re.search(r"def _sync_tap_store\(\*, attempts: int = (\d+), interval_s: float = ([\d.]+)\)", src)
+    assert m and int(m.group(1)) * float(m.group(2)) >= 900
+
+
 def test_tap_worker_survives_exception(tmp_path, caplog):
     import logging
 
