@@ -1113,3 +1113,56 @@ installed speech_to_speech 1.0.0 `Chat` in WSL only.
 
 New test: `test_unanswered_gesture_call_does_not_block_next_turn` in
 `tests/test_run_s2s.py` (skipped on Windows, run in WSL against the real s2s).
+
+## P22. Companion UI recovery controls work (2026-11-26)
+
+The laptop Companion UI looked frozen or ignored its recovery buttons. Each verified bug
+from the polish backlog is fixed:
+
+- **Reconnect button.** `app.js` read an undeclared `lastState`, so pressing Reconnect threw
+  before any request. It now reads `latestState`.
+- **Live updates.** The SSE `familiar:state` listener called an undefined `applyState`, so
+  every pushed update threw. `applyState(s)` now sets `latestState` and calls
+  `renderStatus(s, false)`; `refreshState` uses it too.
+- **Poll cannot wedge.** `apiJson` aborts after 5 s with an `AbortController`, so a hung
+  request rejects and `refreshState`'s `finally` always clears `pollInFlight`.
+- **Stale error banner.** The "Brain unreachable" banner now hides on the next good poll.
+  Only that banner is cleared, so action results still show until replaced.
+- **Robot-only buttons.** Served from the laptop :8090, `/_familiar/boot-status` 404s.
+  `companion_plus.js` now stops its 750 ms poll on the first 404, hides Speak Test and Reset
+  Audio, and adds the note "Only available from the robot UI on port 8043".
+- **Mute and stop logging.** `api_mute_stop` now calls `_publish_state()`, as mute and
+  unmute already did, so the UI updates at once.
+- **Campaign switch keeps the session.** `_on_campaign_switched` still ends and queues the
+  old session, then starts a new one in the new campaign's sessions dir if one was active.
+- **Native Reconnect reaches the robot.** In native mode `POST /api/robot/reconnect` only
+  set a detail string and returned 200 without contacting the robot. It now forwards to the
+  native app's `:8043` audio reconnect route, on the request's `host`, else the known robot
+  host, else `reachy-mini.local`, with a 5 s timeout. A failure returns 503 and logs a
+  WARNING.
+
+Deviations from the plan text:
+
+- The plan names the native route `/_familiar/reconnect`. No such route exists:
+  `reachy_familiar/web.py` serves only `/_familiar/speak-test` and
+  `/_familiar/reconnect-audio`, so a forward to `/_familiar/reconnect` would always 404. The
+  forward uses `/_familiar/reconnect-audio`, the native app's only reconnect route and the
+  one the robot UI's Reset Audio button already calls.
+- The plan lists the error banner under `app.py`; the banner lives in `app.js`, so the fix
+  is there.
+- The plan puts `test_campaign_switch_keeps_session_active` in `tests/test_campaign.py`.
+  That file tests campaign memory and has no app fixture; the campaign switch tests and the
+  native-mode app fixture live in `tests/test_native_robot_and_profiles.py`, so both app
+  tests went there.
+- The existing `test_native_robot_mode_never_reports_disabled_before_or_after_heartbeat`
+  now patches `requests.Session.post`, because native Reconnect makes a real HTTP call and
+  the test must not reach the network. Its assertions are unchanged.
+
+Not run in a browser or against the real robot; the JS changes are pinned by static
+checks of the served files only.
+
+New tests: `test_app_js_has_no_undeclared_state_refs`,
+`test_app_js_poll_cannot_wedge_and_good_poll_clears_banner`,
+`test_companion_plus_handles_missing_familiar_routes` and `test_mute_stop_publishes_state`
+in `tests/test_companion_ui.py`; `test_campaign_switch_keeps_session_active` and
+`test_robot_reconnect_route_reaches_native_app` in `tests/test_native_robot_and_profiles.py`.

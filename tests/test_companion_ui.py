@@ -352,3 +352,51 @@ def test_session_purge_rejects_path_traversal_and_preserves_canary(ui_env) -> No
             purge_session(tmp_path / "sessions", bad_sid, store=app.extensions["store"])
     assert canary.exists()
 
+
+
+def _js_function_body(js: str, signature: str) -> str:
+    start = js.index(signature)
+    end = js.index("\n  }\n", start)
+    return js[start:end]
+
+
+def test_app_js_has_no_undeclared_state_refs() -> None:
+    js = (REPO_ROOT / "familiar_brain" / "static" / "app.js").read_text(encoding="utf-8")
+    # The Reconnect button read an undeclared `lastState` and threw before any request.
+    assert "lastState" not in js
+    # The SSE listener calls applyState, which must exist or every live update throws.
+    assert re.search(r"function applyState\s*\(", js)
+    body = _js_function_body(js, "function applyState")
+    assert "latestState" in body and "renderStatus" in body
+
+
+def test_app_js_poll_cannot_wedge_and_good_poll_clears_banner() -> None:
+    js = (REPO_ROOT / "familiar_brain" / "static" / "app.js").read_text(encoding="utf-8")
+    api_body = _js_function_body(js, "async function apiJson")
+    # A hung fetch must abort so refreshState's finally clears pollInFlight.
+    assert "AbortController" in api_body
+    assert "5000" in api_body
+    refresh_body = _js_function_body(js, "async function refreshState")
+    assert "hideBanner" in refresh_body
+
+
+def test_companion_plus_handles_missing_familiar_routes() -> None:
+    js = (REPO_ROOT / "familiar_brain" / "static" / "companion_plus.js").read_text(encoding="utf-8")
+    body = _js_function_body(js, "async function pollRobotBootStatus")
+    # Served from the laptop :8090 the robot-only routes 404; the 750 ms poll must stop.
+    assert "404" in body
+    assert "clearInterval" in body
+    assert "Only available from the robot UI on port 8043" in js
+
+
+def test_mute_stop_publishes_state(ui_env, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, app, _fake, _tmp = ui_env
+    published: list[tuple[str, dict]] = []
+    bus = app.extensions["event_bus"]
+    monkeypatch.setattr(bus, "publish", lambda kind, payload: published.append((kind, payload)))
+
+    resp = client.post("/api/mute_and_stop_logging")
+    assert resp.status_code == 200
+    states = [p for k, p in published if k == "state"]
+    assert states, "mute and stop logging must push a state update to the UI"
+    assert states[-1]["muted"] is True

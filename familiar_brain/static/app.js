@@ -45,6 +45,7 @@
 
   let latestState = null;
   let pollInFlight = false;
+  let brainErrorShown = false;
   let pendingPurgeSid = null;
   let purgeTimer = null;
   let clearArmed = false;
@@ -89,7 +90,19 @@
       init.headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(options.body);
     }
-    const resp = await fetch(url, init);
+    // A hung request would leave pollInFlight set forever and freeze every later poll.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    init.signal = controller.signal;
+    let resp;
+    try {
+      resp = await fetch(url, init);
+    } catch (err) {
+      if (err && err.name === "AbortError") throw new Error("Request timed out after 5 s");
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
     let data = {};
     try {
       data = await resp.json();
@@ -349,16 +362,25 @@
     ui.sessionList.replaceChildren(...rows);
   }
 
+  function applyState(s) {
+    latestState = s;
+    renderStatus(s, false);
+  }
+
   async function refreshState() {
     if (pollInFlight) return;
     pollInFlight = true;
     try {
       const state = await apiJson("/api/state");
-      latestState = state;
-      renderStatus(state, false);
+      applyState(state);
+      if (brainErrorShown) {
+        brainErrorShown = false;
+        hideBanner();
+      }
     } catch (err) {
       renderStatus(latestState || {}, true);
       showBanner(`Brain unreachable: ${err.message}`, "error");
+      brainErrorShown = true;
     } finally {
       pollInFlight = false;
     }
@@ -520,7 +542,7 @@
         showBanner("Reconnecting to Reachy Mini...", "info");
         try {
           let res;
-          if (lastState && lastState.robot && lastState.robot.mode === "native") {
+          if (latestState && latestState.robot && latestState.robot.mode === "native") {
             try {
               res = await apiJson("/_familiar/reconnect-audio", { method: "POST", body: {} });
             } catch (_) {

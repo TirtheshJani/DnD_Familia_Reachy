@@ -883,6 +883,7 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
         state.logging_enabled = False
         state.end_conversation()
         state.set_cue(ASLEEP)
+        _publish_state()
         return jsonify(ok=True)
 
     @app.post("/api/deep_night")
@@ -1282,13 +1283,29 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
             return jsonify(ok=ok, **snap), (200 if ok else 503)
 
         with robot_lock:
-            if robot_state.get("mode") == "native" or _native_robot_env():
+            native = robot_state.get("mode") == "native" or _native_robot_env()
+            if native:
                 robot_state["mode"] = "native"
                 robot_state["disabled"] = False
-                if not robot_state.get("backend_connected"):
-                    robot_state["detail"] = "managed by reachy_familiar; waiting for audio stream"
+                native_host = req_host or robot_state.get("host") or "reachy-mini.local"
+        if native:
+            # The native app owns the audio link; only its :8043 route can restart it.
+            url = f"http://{native_host}:8043/_familiar/reconnect-audio"
+            try:
+                resp = robot_http.post(url, json={}, timeout=5)
+                res = resp.json()
+                ok = resp.status_code == 200 and bool(res.get("ok", True))
+                detail = str(res.get("detail") or res.get("error") or f"native app returned {resp.status_code}")
+            except Exception as exc:
+                ok = False
+                detail = f"native app reconnect failed at {url}: {exc}"
+            if not ok:
+                app.logger.warning("native robot reconnect failed: %s", detail)
+            with robot_lock:
+                robot_state["last_checked_at"] = time.time()
+                robot_state["detail"] = detail
                 snap = dict(robot_state)
-                return jsonify(ok=True, **snap), 200
+            return jsonify(ok=ok, **snap), (200 if ok else 503)
 
         no_robot = _no_robot_env()
         if no_robot and not _is_loopback_host(req_host):
@@ -1402,7 +1419,8 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
         then re-embeds the target campaign's notes & memory in a background thread so
         switching back to a large campaign never blocks or times out the HTTP UI request.
         """
-        if log.active_id is not None:
+        was_in_session = log.active_id is not None
+        if was_in_session:
             _end_session()
         prof.notes_dir.mkdir(parents=True, exist_ok=True)
         prof.sessions_dir.mkdir(parents=True, exist_ok=True)
@@ -1418,6 +1436,11 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
         speaker_registry.store_path = prof.speakers_path
         speaker_registry.load()
         _notify_tap_reload(store_path=prof.speakers_path)
+        # A switch mid-game used to leave no session running, so nothing after it was logged.
+        if was_in_session:
+            log.start()
+            state.session_started_at = time.time()
+            live.begin(log.path)
 
         target_id = prof.id
 
