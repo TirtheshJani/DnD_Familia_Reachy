@@ -18,7 +18,8 @@ log = logging.getLogger("familiar.upstream")
 
 
 class Upstream:
-    def __init__(self, *, base_url: str, generate_slot: int, brain_tool_names: set[str], timeout_s: float = 60.0,
+    def __init__(self, *, base_url: str, generate_slot: int, brain_tool_names: set[str],
+                 timeout_s: tuple[float, float] = (5, 15),
                  reasoning_effort: str | None = "none"):
         self.base_url = base_url.rstrip("/")
         self.generate_slot = generate_slot

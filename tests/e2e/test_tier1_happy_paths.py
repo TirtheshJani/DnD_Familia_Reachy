@@ -588,7 +588,7 @@ def test_t1_f03_5_launch_ps1_forwards_auto_session_and_no_audio_tap():
 @pytest.mark.m5
 def test_t1_f04_1_start_all_passes_bounded_stt_flags():
     txt = (REPO_ROOT / "scripts" / "start_all.sh").read_text(encoding="utf-8")
-    assert "--max_speech_ms" in txt
+    # No --max_speech_ms: s2s drops a longer segment untranscribed (test_start_all_vad_args.py).
     assert "--unanswered_reopen_ms" in txt
     assert "--smart_turn_max_wait_ms" in txt
 
@@ -597,9 +597,7 @@ def test_t1_f04_1_start_all_passes_bounded_stt_flags():
 def test_t1_f04_2_stt_flag_values_bounded_in_start_all():
     txt = (REPO_ROOT / "scripts" / "start_all.sh").read_text(encoding="utf-8")
     m_reopen = re.search(r"--unanswered_reopen_ms\s+(\d+)", txt)
-    m_max = re.search(r"--max_speech_ms\s+(\d+)", txt)
     assert m_reopen and int(m_reopen.group(1)) < 7000
-    assert m_max and 1000 <= int(m_max.group(1)) <= 60000
 
 
 @pytest.mark.m5

@@ -10,6 +10,8 @@ In speech-to-speech 1.0.0:
 3. Chat.has_pending_tool_calls refuses every later LLM request while any function_call
    lacks its output, with no timeout, so one robot gesture result the app never sends
    silences the familiar until reconnect.
+4. One brain request could hold the LLM thread for about a minute: the SDK retried a
+   timed-out request twice and nothing bounded a slow stream.
 
 This wrapper applies surgical runtime guards before launching speech_to_speech.cli.main().
 """
@@ -20,12 +22,14 @@ import logging
 import os
 import re
 import sys
+import threading
 from typing import Any, Iterator
 
 logger = logging.getLogger("run_s2s")
 
 DEFAULT_MAX_TURN_AUDIO_S = 30.0
 DEFAULT_MAX_TURN_REVISIONS = 8
+DEFAULT_LLM_DEADLINE_S = 20.0
 KOKORO_VOICE_RE = re.compile(r"^[abefhijpz][fm]_[a-z][a-z0-9_]*$")
 # Robot-side tools that only move Rocky (robot_profile/familiar/profile.md, app.py
 # GESTURE_TOOLS). An unanswered call to one of these must not block later turns.
@@ -189,6 +193,68 @@ def patch_chat_pending_tools(chat_cls: type[Any]) -> bool:
     return True
 
 
+def patch_responses_request(lm_cls: type[Any]) -> bool:
+    """Bound one brain request: no SDK retries, and a total deadline on the stream.
+
+    Each retry cost another httpx read timeout, and nothing could interrupt a slow stream,
+    so one turn held the LLM thread for about a minute. At the deadline the stream is
+    closed and httpx.ReadTimeout raised, which s2s's _generate already turns into its
+    fallback reply and an EndOfResponse.
+    """
+    if getattr(lm_cls._request, "_familiar_deadline_patched", False):
+        return False
+
+    orig_request = lm_cls._request
+    orig_iter = lm_cls._iter_stream_events
+
+    @functools.wraps(orig_request)
+    def no_retry_request(self: Any, api_input: Any, optional_kwargs: dict[str, Any]) -> Any:
+        if self.client.max_retries != 0:
+            self.client = self.client.with_options(max_retries=0)
+        return orig_request(self, api_input, optional_kwargs)
+
+    @functools.wraps(orig_iter)
+    def deadline_iter(self: Any, api_response: Any) -> Iterator[Any]:
+        import httpx
+
+        deadline_s = _env_float("FAMILIAR_LLM_DEADLINE_S", DEFAULT_LLM_DEADLINE_S)
+        expired = threading.Event()
+        lock = threading.Lock()
+        finished = False
+
+        def expire() -> None:
+            with lock:  # never close a stream this generator has already let go of
+                if finished:
+                    return
+                expired.set()
+            logger.warning("LLM stream passed its %.1fs deadline; closing it", deadline_s)
+            api_response.close()
+
+        timer = threading.Timer(deadline_s, expire)
+        timer.daemon = True
+        timer.start()
+        try:
+            for event in orig_iter(self, api_response):
+                if expired.is_set():
+                    break
+                yield event
+        except Exception as exc:
+            if expired.is_set():
+                raise httpx.ReadTimeout(f"LLM stream passed its {deadline_s:.1f}s deadline") from exc
+            raise
+        finally:
+            with lock:
+                finished = True
+            timer.cancel()
+        if expired.is_set():
+            raise httpx.ReadTimeout(f"LLM stream passed its {deadline_s:.1f}s deadline")
+
+    no_retry_request._familiar_deadline_patched = True  # type: ignore[attr-defined]
+    lm_cls._request = no_retry_request
+    lm_cls._iter_stream_events = deadline_iter
+    return True
+
+
 def is_valid_kokoro_voice(voice: str | None) -> bool:
     return bool(voice and KOKORO_VOICE_RE.match(voice.strip()))
 
@@ -255,6 +321,7 @@ def apply_s2s_patches(
 ) -> None:
     from speech_to_speech.LLM.chat import Chat  # type: ignore[import-not-found]
     from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor  # type: ignore[import-not-found]
+    from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler  # type: ignore[import-not-found]
     from speech_to_speech.TTS.kokoro_handler import KokoroTTSHandler  # type: ignore[import-not-found]
     from speech_to_speech.VAD.vad_handler import VADHandler  # type: ignore[import-not-found]
 
@@ -265,6 +332,7 @@ def apply_s2s_patches(
     )
     patch_lm_output_processor(LMOutputProcessor)
     patch_chat_pending_tools(Chat)
+    patch_responses_request(ResponsesApiModelHandler)
     patch_kokoro_voice_guard(KokoroTTSHandler)
 
 

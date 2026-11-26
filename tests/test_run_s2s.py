@@ -280,3 +280,84 @@ def test_unanswered_gesture_call_does_not_block_next_turn() -> None:
         )
     )
     assert chat.has_pending_tool_calls() is False
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("speech_to_speech") is None,
+    reason="speech_to_speech package only installed in WSL2 s2s venv",
+)
+def test_llm_stream_has_total_deadline_and_no_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    import json
+    import threading
+    import time
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    import httpx
+    from speech_to_speech.LLM.responses_api_language_model import ResponsesApiModelHandler
+
+    posts: list[str] = []
+    fail_status: list[int] = []
+    stop = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args: object) -> None:
+            pass
+
+        def do_POST(self) -> None:
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            if not body.get("stream"):  # setup()'s warmup probe
+                out = json.dumps({"id": "resp_w", "object": "response", "status": "completed",
+                                  "created_at": 0, "model": "familiar", "output": []}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+                return
+            posts.append(self.path)
+            if fail_status:
+                self.send_response(fail_status[0])
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            n = 0
+            while not stop.is_set():
+                ev = {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0,
+                      "content_index": 0, "sequence_number": n, "delta": "and on ", "logprobs": []}
+                try:
+                    self.wfile.write(f"event: {ev['type']}\ndata: {json.dumps(ev)}\n\n".encode())
+                    self.wfile.flush()
+                except OSError:
+                    return
+                n += 1
+                stop.wait(0.5)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv("FAMILIAR_LLM_DEADLINE_S", "1.5")
+    run_s2s.apply_s2s_patches()
+    handler = ResponsesApiModelHandler.__new__(ResponsesApiModelHandler)
+    handler.setup(model_name="familiar", base_url=f"http://127.0.0.1:{server.server_address[1]}/v1",
+                  api_key="none", stream=True, request_timeout_s=5.0)
+    api_input = [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Rocky?"}]}]
+    try:
+        start = time.monotonic()
+        api_response = handler._request(api_input, {})
+        with pytest.raises(httpx.ReadTimeout):
+            for _ in handler._iter_stream_events(api_response):
+                assert time.monotonic() - start < 3.0, "the stream ran past its deadline"
+        assert time.monotonic() - start < 3.0
+        assert len(posts) == 1
+
+        # A failed request is not sent again: each SDK retry used to cost another read timeout.
+        fail_status.append(500)
+        with pytest.raises(Exception):
+            handler._request(api_input, {})
+        assert len(posts) == 2
+    finally:
+        stop.set()
+        server.shutdown()
+        server.server_close()

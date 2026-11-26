@@ -198,7 +198,7 @@ S2S_ARGS=(
   --responses_api_stream
   --enable_live_transcription
   --thresh 0.6 --chat_size 12
-  --max_speech_ms 25000 --smart_turn_max_wait_ms 1200 --unanswered_reopen_ms 1500
+  --smart_turn_max_wait_ms 1200 --unanswered_reopen_ms 1500
 )
 
 # Run through scripts/run_s2s.py to bound VAD speculative turns and guard Kokoro voice overrides.

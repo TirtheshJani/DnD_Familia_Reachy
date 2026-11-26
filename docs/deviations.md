@@ -1113,3 +1113,73 @@ installed speech_to_speech 1.0.0 `Chat` in WSL only.
 
 New test: `test_unanswered_gesture_call_does_not_block_next_turn` in
 `tests/test_run_s2s.py` (skipped on Windows, run in WSL against the real s2s).
+
+## P22. Bounded LLM turns and no dropped long speech (2026-11-26)
+
+One brain request could hold the only s2s LLM thread for about a minute: the OpenAI SDK
+retried a timed-out request twice, each retry cost another 20 s httpx read timeout, the
+brain sent no headers until llama's first token, and nothing bounded a slow stream. And
+`--max_speech_ms 25000` made s2s throw away any segment over 25 s with no transcript.
+
+- **`patch_responses_request(ResponsesApiModelHandler)`** (`scripts/run_s2s.py`, applied
+  from `apply_s2s_patches()`). `--llm_backend responses-api` builds
+  `speech_to_speech.LLM.responses_api_language_model.ResponsesApiModelHandler`, and its
+  `_request` and `_iter_stream_events` are the real names in 1.0.0. `_generate` reaches
+  them through `self`, both directly and through the prefetch worker, so patching the class
+  takes effect. The wrapped `_request` swaps `self.client` for
+  `client.with_options(max_retries=0)` once; checked against the real SDK, a 500 is now
+  sent once instead of three times. The wrapped `_iter_stream_events` starts a
+  `threading.Timer` for `FAMILIAR_LLM_DEADLINE_S` (default 20) that logs a WARNING and
+  calls `api_response.close()`, and the iterator then raises `httpx.ReadTimeout`. That
+  lands in the existing `except httpx.ReadTimeout` in `_generate`, so the turn ends there:
+  s2s speaks its fallback line if nothing had been said yet, and always sends
+  `EndOfResponse`. The prefetch path passes the exception through its queue to the same
+  handler. The timer is cancelled in `finally`, and a lock plus a finished flag stop it
+  closing a stream the iterator has already let go of. In the microseconds between a stream
+  ending on its own and that `finally`, a timer firing at that exact moment would still
+  report a turn that ran the full deadline as a timeout.
+- **Brain** (`familiar_brain/app.py`). The addressed `gen()` yields the SSE comment
+  `: ok` first, so headers and first bytes go out before any upstream work. Checked with
+  the real openai SDK in WSL: a stream that starts with `: ok` parses to the same events.
+- **Upstream** (`familiar_brain/upstream.py`). The default `timeout_s` is now `(5, 15)`:
+  5 s to connect, 15 s between reads, for both `stream` and `complete`. `app.py` does not
+  pass its own value.
+- **`scripts/start_all.sh`**. `--max_speech_ms 25000` removed, so s2s leaves it unset,
+  which means no limit.
+
+Margin on the 20 s deadline. Every s2s queue between the LLM and TTS is an unbounded
+`Queue()` (`s2s_pipeline.py`), so the stream is read as fast as llama generates; TTS
+playback time does not count. The measured addressed turn is 620 ms in total with tool
+round trips under a second (E2 above, docs/versions.md), for a reply capped at two
+sentences. Thinking mode allows six sentences, about 3 to 4 times that length, so an
+estimated 2 to 4 s. That leaves about 5x headroom or more for normal replies, so the plan's
+default stays. Not measured: a long reply the player explicitly asks for on a busy GPU.
+When the deadline does cut a turn, any text s2s has buffered but not yet flushed to TTS (up
+to three sentences) is lost with it.
+
+Deviations from the plan text:
+- `tests/e2e/test_tier1_happy_paths.py` was also changed. Two tests required
+  `--max_speech_ms` in `start_all.sh` with a value between 1 and 60 s; those assertions
+  were removed and the other flag checks kept.
+- Extra test `test_upstream_bounds_the_connect_and_each_read` pins the `(5, 15)` timeout on
+  both upstream calls.
+- The deadline is not a hard stop if the brain goes completely silent. Measured in WSL
+  against the real s2s: with a stream that sent deltas every 0.5 s, the 1.5 s deadline
+  ended it at 2.0 s. With a stream that sent `: ok` and then nothing, the timer fired at
+  1.5 s but the iterator only raised at 20.0 s. On Linux, `close()` from the timer thread
+  does not wake a `recv` that is already blocked, so it takes effect when the next bytes
+  arrive or when httpx's 20 s read timeout fires. With no SDK retries and the brain's own
+  15 s read timeout (after which it sends idle events and ends its stream), the worst case
+  is about 35 s, down from about 60 s or more. Interrupting a blocked read would need a
+  different design (shutting down the socket), which the plan does not ask for, so it was
+  left alone.
+
+Not run on the real robot or the live stack. The s2s patch was exercised against the
+installed speech_to_speech 1.0.0 in WSL only, with local fake servers.
+
+New tests: `test_llm_stream_has_total_deadline_and_no_retries` in `tests/test_run_s2s.py`
+(skipped on Windows, run in WSL against the real s2s);
+`test_start_all_does_not_set_finite_max_speech_ms` in the new
+`tests/test_start_all_vad_args.py` (skipped on Windows, run in WSL with the brain venv);
+`test_addressed_stream_sends_headers_immediately` and
+`test_upstream_bounds_the_connect_and_each_read` in `tests/test_upstream.py`.

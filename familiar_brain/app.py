@@ -781,6 +781,10 @@ def create_app(config_path: Path | str = "config/brain.toml") -> Flask:
 
         def gen():
             spoke = False
+            # An SSE comment, ignored by the client's parser, so the response headers go
+            # out now. speech-to-speech waits on them, and llama sends nothing before its
+            # first token.
+            yield ": ok\n\n"
             try:
                 # The preface goes out before the first upstream frame, so no gesture
                 # waits on generation. speech-to-speech turns each output_item.done that
