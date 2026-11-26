@@ -42,7 +42,7 @@ backend = "auto"
 store_path = "data/speakers.json"
 tap_url = "http://127.0.0.1:8767"
 threshold = 0.72
-max_age_s = 15.0
+max_age_s = 3.0
 
 [behavior]
 humor = 75

@@ -80,6 +80,7 @@ def native_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     cfg = _write_min_config(tmp_path)
     monkeypatch.setenv("FAMILIAR_ROBOT_MODE", "native")
     monkeypatch.delenv("FAMILIAR_NO_ROBOT", raising=False)
+    monkeypatch.delenv("ROBOT_HOST", raising=False)
     monkeypatch.setenv("FAMILIAR_EMBEDDER", "deterministic")
     with patch("familiar_brain.indexing.open_store") as mock_open:
         store = Store(tmp_path / "data" / "knowledge.sqlite", embedder=make_embedder("deterministic"))
@@ -89,7 +90,18 @@ def native_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         app.extensions["close"]()
 
 
-def test_native_robot_mode_never_reports_disabled_before_or_after_heartbeat(native_app):
+def test_native_robot_mode_never_reports_disabled_before_or_after_heartbeat(native_app, monkeypatch: pytest.MonkeyPatch):
+    import requests
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"ok": True, "detail": "Restarting Reachy audio link..."}
+
+    # Reconnect now forwards to the robot's :8043 app; keep the test off the network.
+    monkeypatch.setattr(requests.Session, "post", lambda self, url, *a, **k: _Resp())
     client = native_app.test_client()
 
     # Before heartbeat arrives (while voice engine is still warming up): must NOT say FAMILIAR_NO_ROBOT=1.
@@ -232,3 +244,70 @@ def test_switch_campaign_profile_isolates_memory_notes_roster_and_prompt(native_
     )
     assert "Vacoran Amulet" in nephria_prompt
     assert "Nephria" in nephria_prompt
+
+
+def test_campaign_switch_keeps_session_active(native_app):
+    client = native_app.test_client()
+    started = client.post("/api/session/start")
+    assert started.status_code == 200
+    assert started.get_json()["session"]
+
+    created = client.post("/api/campaigns", json={"name": "Lost Mine", "roster": ["DM", "Nyx"]})
+    assert created.status_code == 200
+    cid = created.get_json()["profile"]["id"]
+    assert client.post("/api/campaigns/switch", json={"id": cid}).status_code == 200
+
+    st = client.get("/api/state").get_json()
+    # Switching mid-game used to end the session and start none, so nothing was logged after.
+    assert st["session"], "a session active before the switch must stay active after it"
+    sessions_dir = native_app.extensions["campaign_manager"].active().sessions_dir
+    assert (sessions_dir / f"{st['session']}.jsonl").exists()
+
+
+def test_robot_reconnect_route_reaches_native_app(native_app, monkeypatch: pytest.MonkeyPatch):
+    import requests
+
+    calls: list[str] = []
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"ok": True, "detail": "Restarting Reachy audio link..."}
+
+    real_post = requests.Session.post
+
+    def fake_post(self, url, *args, **kwargs):
+        if ":8043/" in str(url):
+            calls.append(str(url))
+            return _Resp()
+        return real_post(self, url, *args, **kwargs)
+
+    monkeypatch.setattr(requests.Session, "post", fake_post)
+    client = native_app.test_client()
+    resp = client.post("/api/robot/reconnect", json={})
+    assert resp.status_code == 200
+    assert resp.get_json()["ok"] is True
+    # The native app restarts its audio link only when its :8043 route is called.
+    assert calls == ["http://reachy-mini.local:8043/_familiar/reconnect-audio"]
+
+
+def test_native_reconnect_prefers_launcher_robot_host(native_app, monkeypatch: pytest.MonkeyPatch):
+    # WSL2 often cannot resolve .local names; launch.ps1 resolves the robot and exports ROBOT_HOST.
+    import requests
+
+    calls: list[str] = []
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"ok": True}
+
+    monkeypatch.setenv("ROBOT_HOST", "10.0.0.77")
+    monkeypatch.setattr(requests.Session, "post", lambda self, url, *a, **k: calls.append(str(url)) or _Resp())
+    resp = native_app.test_client().post("/api/robot/reconnect", json={})
+    assert resp.status_code == 200
+    assert calls == ["http://10.0.0.77:8043/_familiar/reconnect-audio"]

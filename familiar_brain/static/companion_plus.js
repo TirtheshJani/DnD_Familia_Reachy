@@ -338,9 +338,35 @@
     }
   }
 
+  let bootStatusTimer = null;
+
+  // Speak Test and Reset Audio exist only on the robot's :8043 server. From the laptop
+  // :8090 they 404, so the buttons are hidden and a note says where they work.
+  function hideRobotOnlyControls() {
+    const speakBtn = document.getElementById("btn-speak-test");
+    const resetBtn = document.getElementById("btn-reset-audio");
+    [speakBtn, resetBtn].forEach((btn) => {
+      if (btn) btn.classList.add("hidden");
+    });
+    const anchor = speakBtn && speakBtn.parentElement;
+    if (anchor && !document.getElementById("robot-only-note")) {
+      const note = document.createElement("p");
+      note.id = "robot-only-note";
+      note.className = "meta-tag";
+      note.textContent = "Speak Test and Reset Audio: Only available from the robot UI on port 8043";
+      anchor.insertAdjacentElement("afterend", note);
+    }
+  }
+
   async function pollRobotBootStatus() {
     try {
       const resp = await fetch("/_familiar/boot-status", { cache: "no-store" });
+      if (resp.status === 404) {
+        clearInterval(bootStatusTimer);
+        bootStatusTimer = null;
+        hideRobotOnlyControls();
+        return;
+      }
       if (!resp.ok) return;
       const d = await resp.json();
       if (el.voiceBootBanner) {
@@ -611,5 +637,5 @@
   });
   pollRobotBootStatus();
   setInterval(syncState, 4000);
-  setInterval(pollRobotBootStatus, 750);
+  bootStatusTimer = setInterval(pollRobotBootStatus, 750);
 })();

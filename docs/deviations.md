@@ -1264,3 +1264,115 @@ this, `pgrep -P` found nothing once the loop had exited. The pool watchdog now s
 bad poll (`http.client` errors, a non-dict body, a non-numeric `draining_for_s`) with a WARNING
 instead of its thread dying silently. New tests: `test_stop_kills_s2s_even_when_the_respawn_loop_dies_first`
 (WSL), `test_pool_is_wedged_tolerates_odd_pool_bodies`, `test_pool_watchdog_keeps_running_after_a_poll_error`.
+
+## P28. Companion UI recovery controls work (2026-11-26)
+
+The laptop Companion UI looked frozen or ignored its recovery buttons. Each verified bug
+from the polish backlog is fixed:
+
+- **Reconnect button.** `app.js` read an undeclared `lastState`, so pressing Reconnect threw
+  before any request. It now reads `latestState`.
+- **Live updates.** The SSE `familiar:state` listener called an undefined `applyState`, so
+  every pushed update threw. `applyState(s)` now sets `latestState` and calls
+  `renderStatus(s, false)`; `refreshState` uses it too.
+- **Poll cannot wedge.** `apiJson` aborts after 5 s with an `AbortController`, so a hung
+  request rejects and `refreshState`'s `finally` always clears `pollInFlight`.
+- **Stale error banner.** The "Brain unreachable" banner now hides on the next good poll.
+  Only that banner is cleared, so action results still show until replaced.
+- **Robot-only buttons.** Served from the laptop :8090, `/_familiar/boot-status` 404s.
+  `companion_plus.js` now stops its 750 ms poll on the first 404, hides Speak Test and Reset
+  Audio, and adds the note "Only available from the robot UI on port 8043".
+- **Mute and stop logging.** `api_mute_stop` now calls `_publish_state()`, as mute and
+  unmute already did, so the UI updates at once.
+- **Campaign switch keeps the session.** `_on_campaign_switched` still ends and queues the
+  old session, then starts a new one in the new campaign's sessions dir if one was active.
+- **Native Reconnect reaches the robot.** In native mode `POST /api/robot/reconnect` only
+  set a detail string and returned 200 without contacting the robot. It now forwards to the
+  native app's `:8043` audio reconnect route, on the request's `host`, else the known robot
+  host, else `reachy-mini.local`, with a 5 s timeout. A failure returns 503 and logs a
+  WARNING.
+
+Deviations from the plan text:
+
+- The plan names the native route `/_familiar/reconnect`. No such route exists:
+  `reachy_familiar/web.py` serves only `/_familiar/speak-test` and
+  `/_familiar/reconnect-audio`, so a forward to `/_familiar/reconnect` would always 404. The
+  forward uses `/_familiar/reconnect-audio`, the native app's only reconnect route and the
+  one the robot UI's Reset Audio button already calls.
+- The plan lists the error banner under `app.py`; the banner lives in `app.js`, so the fix
+  is there.
+- The plan puts `test_campaign_switch_keeps_session_active` in `tests/test_campaign.py`.
+  That file tests campaign memory and has no app fixture; the campaign switch tests and the
+  native-mode app fixture live in `tests/test_native_robot_and_profiles.py`, so both app
+  tests went there.
+- The existing `test_native_robot_mode_never_reports_disabled_before_or_after_heartbeat`
+  now patches `requests.Session.post`, because native Reconnect makes a real HTTP call and
+  the test must not reach the network. Its assertions are unchanged.
+
+Not run in a browser or against the real robot; the JS changes are pinned by static
+checks of the served files only.
+
+New tests: `test_app_js_has_no_undeclared_state_refs`,
+`test_app_js_poll_cannot_wedge_and_good_poll_clears_banner`,
+`test_companion_plus_handles_missing_familiar_routes` and `test_mute_stop_publishes_state`
+in `tests/test_companion_ui.py`; `test_campaign_switch_keeps_session_active` and
+`test_robot_reconnect_route_reaches_native_app` in `tests/test_native_robot_and_profiles.py`.
+
+Review fixes (same day): the 5 s fetch abort is now opt-in (`apiJson(url, { timeoutMs })`) and
+only the `/api/state` and `/api/sessions` polls pass it. Before this, every UI action aborted at
+5 s, so the official-app Reconnect and speaker enroll showed "timed out" while the server kept
+working, and a retry started a second robot connect. Native Reconnect now prefers the launcher's
+`ROBOT_HOST` over the heartbeat's hardcoded `reachy-mini.local`, which WSL2 often cannot resolve.
+New test: `test_native_reconnect_prefers_launcher_robot_host`; `test_app_js_poll_cannot_wedge_and_good_poll_clears_banner`
+now pins the opt-in timeout.
+
+## P26. Speaker ID no longer leaves Rocky ignoring the table (2026-11-26)
+
+The tap kept the last matched speaker, usually the DM, for up to 15 s. Real clients never
+send `input_audio_buffer.commit`, so only streaming matches ran, and those never cleared the
+label on a miss. Whoever spoke next was gated as the DM. Fixed in four places:
+
+- **Label expires on a miss.** The streaming match in `_tap_worker` now uses
+  `clear_on_miss=True`, so a non-match clears the role instead of keeping the old one.
+  `config/brain.toml` sets `speakers.max_age_s = 3.0` (read by `_query_tap_current` in
+  `app.py`), so a stale label also ages out in 3 s instead of 15 s.
+- **Worker survives errors.** `_tap_worker` used to die silently on any exception, which
+  ended speaker ID for the night. The per-batch work moved into `_drain_tap_queue`; the loop
+  catches `Exception`, logs at WARNING with the traceback, sleeps 0.1 s so a repeating error
+  cannot spin hot, and carries on. `asyncio.CancelledError` is not caught, so shutdown still
+  cancels the worker cleanly.
+- **GA input rate.** `_inspect_client_text` now also reads
+  `session.audio.input.format.rate` from a GA `session.update`. Before, a 24 kHz GA client
+  was decoded as 16 kHz.
+- **Tap and brain read the same file.** `_notify_tap_reload` always sends `store_path`
+  (the active campaign's `speakers.json`), so enroll, delete and clear no longer leave the
+  tap on `data/speakers.json`. It now returns whether the tap answered and logs a WARNING
+  when it does not. New `_sync_tap_store` (exposed as `app.extensions["sync_tap_store"]`,
+  called from `main()`) sends the same reload at startup from a daemon thread: up to 30
+  attempts, 0.3 s request timeout, 1 s apart, stopping as soon as the tap answers, and one
+  WARNING if it gives up. It never blocks brain startup or a request thread.
+
+Deviations from the plan:
+
+- The startup retry is called from `main()`, not from `create_app`, so the many test apps
+  built by `create_app` do not start background threads that post to test taps.
+- Two extra tests pin the startup retry (stops once the tap answers; warns when it gives up).
+
+Not run against the real robot. The e2e suites that drive the tap (`tests/e2e/`) were not
+run here.
+
+New tests in `tests/test_speaker_id.py`: `test_tap_role_clears_on_streaming_miss`,
+`test_tap_worker_survives_exception`, `test_tap_reads_ga_input_rate`,
+`test_notify_tap_reload_always_sends_store_path`,
+`test_tap_store_sync_retries_in_background_until_tap_answers` and
+`test_tap_store_sync_gives_up_with_warning`.
+
+Review fixes (same day): the startup store sync now retries for up to 15 minutes (900 x 1 s).
+`start_all.sh` starts the tap only after llama (up to 600 s cold) and s2s (up to 240 s) are
+ready, so the 30 s version always gave up first and the tap kept reading `data/speakers.json`.
+The streaming match now clears the label only after two misses in a row that contain a voice
+(conf above 0); a silent window leaves expiry to `speakers.max_age_s`. With a single miss
+clearing it, one laugh or dice clatter during the DM's narration dropped the DM label, and the
+gate then answered the DM inside an open follow-up window. Commits (the rare explicit path) still
+clear on the first miss. New tests: `test_one_noisy_streaming_window_keeps_the_dm_label`,
+`test_silent_streaming_window_keeps_the_dm_label`, `test_startup_tap_sync_outlasts_a_cold_stack_start`.
