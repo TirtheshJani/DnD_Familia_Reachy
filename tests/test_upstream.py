@@ -226,7 +226,9 @@ def test_upstream_bounds_the_connect_and_each_read(fake, monkeypatch):
     monkeypatch.setattr(sess, "post", post)
     list(up.stream({"input": [{"role": "user", "content": "hi"}], "stream": True}))
     up.complete({"input": [{"role": "user", "content": "hi"}]})
-    assert seen == [(5, 15), (5, 15)]
+    # Non-streaming (warmup probe, history compaction) gets no bytes until llama has finished,
+    # so its read keeps the old 60 s; only the streaming turn is bounded at 15 s.
+    assert seen == [(5, 15), (5, 60)]
 
 
 def test_addressed_stream_sends_headers_immediately(fake, tmp_path, monkeypatch):

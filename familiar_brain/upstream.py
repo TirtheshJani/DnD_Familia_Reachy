@@ -76,7 +76,7 @@ class Upstream:
         tools, so no brain-side tool round trip is attempted on this path.
         """
         body = self._with_defaults(copy.deepcopy(req), stream=False)
-        r = self._session().post(f"{self.base_url}/responses", json=body, timeout=self.timeout_s)
+        r = self._session().post(f"{self.base_url}/responses", json=body, timeout=(self.timeout_s[0], 60))
         r.raise_for_status()
         return r.json()
 

@@ -1509,3 +1509,8 @@ New tests in `tests/test_audio_bridge_backpressure.py`:
 predicted (no restart calls; WebSocket never closed) and pass on Windows (Python 3.11, uv).
 `tests/test_native_robot_and_profiles.py` and `tests/test_wake_and_reachy_app.py` pass on
 Windows.
+
+Whole-branch review fix (same day): `Upstream.complete()` (the non-streaming warmup probe and
+history compaction) is back to a 60 s read timeout. llama sends nothing on that path until it has
+finished, so the 15 s read meant for streaming turns would make a long compaction fail. Streaming
+turns keep `(5, 15)`. `test_upstream_bounds_the_connect_and_each_read` pins both.
