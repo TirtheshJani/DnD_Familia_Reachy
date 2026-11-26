@@ -1376,3 +1376,136 @@ clearing it, one laugh or dice clatter during the DM's narration dropped the DM 
 gate then answered the DM inside an open follow-up window. Commits (the rare explicit path) still
 clear on the first miss. New tests: `test_one_noisy_streaming_window_keeps_the_dm_label`,
 `test_silent_streaming_window_keeps_the_dm_label`, `test_startup_tap_sync_outlasts_a_cold_stack_start`.
+
+## P24. robot_connect warns on an old app and avoids a double backend restart (2026-11-26)
+
+Plan Task 9 (findings cause 6). Pollen's conversation app before 1.2.0 has no send timeout
+on mic frames, so a dead network path can freeze its record loop for minutes. The robot
+upgrade is a runbook step (Task 10); this change makes an old app visible at connect time.
+
+- **`parse_app_version(listing)`** and **`MIN_APP_VERSION = (1, 2, 0)`** in
+  `scripts/robot_connect.py`. The version is read from `version` or `info.version` in the
+  `/rpc` `conversation.status` reply, then the daemon's `current-app-status`. Older than
+  1.2.0 logs a WARNING naming the minimum; a missing or unreadable version logs a WARNING
+  too. Neither stops the connect flow. `main()` now sets up logging so the WARNING lands in
+  `robot_connect.log` with its level.
+- **`backend.config` is skipped** when `conversation.status` already reports the same host
+  and port and `backend_connected` is True.
+- **`personalities.apply` no longer passes `force: True`**, so applying the profile does not
+  restart the backend a second time.
+
+Deviations from the plan text:
+- MIN_APP_VERSION was confirmed only from the v1.2.0 release note ("Drop a dead realtime
+  socket when an audio send stalls"); the constant name `AUDIO_SEND_TIMEOUT_S` was not
+  checked in Pollen's source, and pages of releases older than v0.6.2 were not read.
+- The skip of `backend.config` also requires `backend_connected` True. The plan says skip
+  when host and port are unchanged; skipping while disconnected would leave a stuck app
+  with no reconnect, and re-running robot_connect is how TJ recovers it.
+- The field names for the app version (`version`, `info.version`) and for the current
+  backend target in `conversation.status` (`host`, `port`, as `tests/e2e/fakes.py` models
+  it) were not checked against the real app. If the real reply lacks them, the result is
+  a "could not read" WARNING and `backend.config` is sent as before, never a crash.
+
+Not run against the real robot or app.
+
+New tests in `tests/test_robot_connect.py`: `test_warns_on_old_app_version`,
+`test_no_warning_on_current_version`, `test_configure_skips_backend_config_when_unchanged`,
+`test_apply_is_not_forced`.
+
+Review fixes (same day): when `backend.config` is skipped, `personalities.apply` is sent with
+`force: True`, so Reconnect on a stuck app that still reports connected restarts its backend
+exactly once (without this, Reconnect became a no-op in that case). The version check now only
+uses the daemon status when it describes the conversation app, so another app's version is never
+read as ours. New tests: `test_skipped_backend_config_still_restarts_backend_once`,
+`test_version_check_ignores_another_running_app`.
+
+## P25. Native mic thread survives send stalls and reconnects when it dies (2026-11-26)
+
+`SimpleWebSocket.recv_text` used to set a 0.5 s timeout on the socket that the
+`reachy-mic-tx` thread also uses for `sendall`. Any send stall over 0.5 s raised
+`TimeoutError`, `_mic_loop` logged it at DEBUG and exited, and `_run_session` kept
+answering pings with `connected=True`, so Rocky went deaf until someone pressed Reconnect.
+
+- **`recv_text(timeout)`** (`reachy_familiar/audio_bridge.py`) no longer touches the socket
+  timeout. When its buffer is empty it waits up to `timeout` with `select.select` for the
+  first byte and returns None if nothing is readable. Once a frame starts, the rest is read
+  with the 10 s timeout set once in `__init__`, so a frame split across slow packets no
+  longer tears the session down, and a stalled `sendall` waits up to 10 s instead of 0.5 s.
+- **`_run_session`** raises `ConnectionError("mic sender thread exited")` after any
+  `recv_text` when the mic thread is dead and `stop_event` is not set, so `run_loop`
+  reconnects (it logs that at WARNING, as before).
+- **`_mic_loop`** logs its ending exception at WARNING and calls `ws.close()` before
+  `break`.
+- **`SimpleWebSocket.close()`** is safe from any thread: `shutdown(SHUT_RDWR)` then
+  `close()`, each swallowing `OSError`.
+- **`RealtimeAudioBridge.mic_alive`** is True while the `reachy-mic-tx` thread runs (for the
+  Task 3 heartbeat).
+
+Deviations from the plan text:
+- `close()` no longer sends a WebSocket close frame. The plan says "shutdown then close";
+  sending a frame needs the send lock, which a mic thread stuck in `sendall` holds, so it
+  could block the caller (for example `request_reconnect` on the web thread) for up to 10 s.
+  The server now sees a plain TCP close instead of a 1000 close frame.
+- The `socket.timeout` catch around the first two header bytes in `recv_text` was removed:
+  after `select` reports data, a timeout there is a stall mid-frame and now propagates.
+- If the robot object has no `media.get_audio_sample`, `_mic_loop` returns at once and the
+  session now reconnects every 2 s. The real `ReachyMini` always has it.
+
+Not run against the real robot.
+
+New tests in `tests/test_audio_bridge_backpressure.py`:
+`test_mic_thread_survives_or_reconnects_after_send_stall` (fake server with
+`SO_RCVBUF=8192` that stops reading for 4 s), `test_partial_frame_does_not_tear_down_session`,
+`test_mic_send_failure_triggers_reconnect`. All three failed against the old code on Windows
+for the reasons the plan predicted (mic thread dead with no reconnect; `TimeoutError` from
+`_take`; `_run_session` still running) and pass on Windows (Python 3.11, uv) and in WSL
+Ubuntu-24.04. `tests/test_native_robot_and_profiles.py` and `tests/test_wake_and_reachy_app.py`
+pass on Windows.
+
+## P27. Native app restarts stalled mic capture and reports it in the heartbeat (2026-11-26)
+
+If GStreamer or ALSA stopped delivering samples, `get_audio_sample()` returned None forever
+and `_mic_loop` slept in a loop with no restart. Capture was also started only once in
+`run_loop`, so a reconnect never re-armed it.
+
+- **`_mic_loop`** (`reachy_familiar/audio_bridge.py`) tracks `last_sample_at`. After
+  `MIC_STALL_S` (1.5 s) of None samples it logs a WARNING containing "stalled" and calls
+  `_restart_media()`. After `MIC_MAX_RESTARTS` (2) restarts that bring no samples back, it
+  sets `mic_stalled`, logs a WARNING, calls `ws.close()` and exits, so the session
+  reconnects (P25). The first sample after a restart resets the counter, clears
+  `mic_stalled` and logs "mic capture resumed after restart" at INFO.
+- **`_restart_media()`** calls `stop_recording()`, `start_recording()`, `start_playing()`
+  on `reachy.media`. Each call that raises is logged at WARNING and the others still run, so
+  a media error never kills the mic thread.
+- **`run_loop`** no longer starts recording and playback once. **`_run_session`** calls
+  `_restart_media()` on every session, so a reconnect also re-arms capture. `run_loop`
+  still stops recording and playback when it exits.
+- **`RealtimeAudioBridge.mic_stalled`** (new) and `mic_alive` (P25) are sent as
+  `mic_alive` and `mic_stalled` in the robot heartbeat and kept in `boot_status()`
+  (`reachy_familiar/main.py`).
+
+Deviations from the plan text:
+- `_restart_media()` runs right after the WebSocket connects, not as the literal first line
+  of `_run_session`. While the laptop is unreachable each connect attempt fails, and
+  restarting the GStreamer pipeline every 2 s for nothing seemed worse than waiting for a
+  live connection.
+- Only a None sample counts as a stall, as the plan says. An empty array still sleeps
+  without counting toward a restart.
+- The brain's `/api/robot/heartbeat` (`familiar_brain/app.py` around line 1384) copies only
+  the fields it knows, so `mic_alive` and `mic_stalled` do not reach the Companion UI yet.
+  Task 3 lists only the two native app files, so the brain was not changed.
+- `start_playing()` now runs on every session without a `stop_playing()` first, as the plan
+  says. The `reachy_mini` package is not installed here, so repeat calls were not checked
+  against the real media API.
+
+Not run against the real robot.
+
+New tests in `tests/test_audio_bridge_backpressure.py`:
+`test_mic_loop_restarts_dead_capture` (frames for 0.5 s, then None until a
+`stop_recording` then `start_recording`) and
+`test_capture_dead_after_two_restarts_forces_reconnect` (never recovers, and
+`stop_recording` raises; asserts two restarts, a WARNING naming `stop_recording`,
+`mic_stalled` and `ws.close()`). Both failed against the old code for the reasons the plan
+predicted (no restart calls; WebSocket never closed) and pass on Windows (Python 3.11, uv).
+`tests/test_native_robot_and_profiles.py` and `tests/test_wake_and_reachy_app.py` pass on
+Windows.

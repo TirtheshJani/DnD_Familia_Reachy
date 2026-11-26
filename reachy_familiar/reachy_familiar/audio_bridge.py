@@ -8,6 +8,7 @@ import json
 import logging
 import math
 import os
+import select
 import socket
 import struct
 import threading
@@ -21,6 +22,9 @@ from reachy_familiar.creature import CreatureController
 log = logging.getLogger("reachy_familiar.audio_bridge")
 
 REALTIME_SAMPLE_RATE = 24000
+# No mic samples for this long counts as a stalled capture; restart it this many times, then reconnect.
+MIC_STALL_S = 1.5
+MIC_MAX_RESTARTS = 2
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
@@ -142,13 +146,16 @@ class SimpleWebSocket:
         return out
 
     def recv_text(self, timeout: float = 1.0) -> str | None:
-        self.sock.settimeout(timeout)
+        # `timeout` only bounds the wait for a frame's first byte. The socket keeps the long
+        # timeout from __init__, so the mic thread's sendall and a frame split across slow
+        # packets are never cut off by this short poll.
         parts: list[bytes] = []
         while True:
-            try:
-                b0, b1 = self._take(2)
-            except socket.timeout:
-                return None
+            if not self._buf:
+                readable, _, _ = select.select([self.sock], [], [], timeout)
+                if not readable:
+                    return None
+            b0, b1 = self._take(2)
             n = b1 & 0x7F
             if n == 126:
                 (n,) = struct.unpack(">H", self._take(2))
@@ -170,13 +177,14 @@ class SimpleWebSocket:
                     return b"".join(parts).decode("utf-8", errors="replace")
 
     def close(self) -> None:
+        """Safe from any thread: shutdown wakes a peer thread blocked in sendall or recv."""
         try:
-            self._send_frame(0x8, struct.pack(">H", 1000))
-        except Exception:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
             pass
         try:
             self.sock.close()
-        except Exception:
+        except OSError:
             pass
 
 
@@ -246,6 +254,14 @@ class RealtimeAudioBridge:
         self._barge_in_muted = False
         self._reconnect_req = threading.Event()
         self._ws: SimpleWebSocket | None = None
+        self._mic_thread: threading.Thread | None = None
+        self.mic_stalled = False
+
+    @property
+    def mic_alive(self) -> bool:
+        """True while the reachy-mic-tx sender thread runs."""
+        t = self._mic_thread
+        return t is not None and t.is_alive()
 
     def set_speaker_boost_db(self, boost_db: float) -> None:
         self.speaker_boost_db = max(0.0, min(15.0, float(boost_db)))
@@ -287,15 +303,6 @@ class RealtimeAudioBridge:
     def run_loop(self, stop_event: threading.Event) -> None:
         """Connect, stream audio, handle tool calls, and auto-reconnect until stop_event."""
         media = getattr(self.reachy, "media", None)
-        if media is not None:
-            for starter in ("start_recording", "start_playing"):
-                fn = getattr(media, starter, None)
-                if callable(fn):
-                    try:
-                        fn()
-                    except Exception as exc:
-                        log.warning("%s failed: %s", starter, exc)
-
         try:
             while not stop_event.is_set():
                 fast_retry = False
@@ -331,6 +338,8 @@ class RealtimeAudioBridge:
     def _run_session(self, stop_event: threading.Event) -> None:
         ws = SimpleWebSocket(self.host, self.port, "/v1/realtime", timeout=10.0)
         self._ws = ws
+        # (Re)arm capture and playback on every session, so a reconnect also restarts dead capture.
+        self._restart_media()
         self.connected = True
         self._barge_in_muted = False
         if self.on_connected:
@@ -362,10 +371,13 @@ class RealtimeAudioBridge:
             daemon=True,
             name="reachy-mic-tx",
         )
+        self._mic_thread = mic_thread
         mic_thread.start()
         try:
             while not stop_event.is_set():
                 raw = ws.recv_text(timeout=0.5)
+                if not mic_thread.is_alive() and not stop_event.is_set():
+                    raise ConnectionError("mic sender thread exited")
                 if self.speaking and (time.monotonic() - self._last_audio_out_at) > 0.6:
                     self.speaking = False
                     self.creature.set_wobbling(False)
@@ -380,6 +392,19 @@ class RealtimeAudioBridge:
             mic_stop.set()
             mic_thread.join(timeout=2.0)
 
+    def _restart_media(self) -> None:
+        """stop_recording, then start_recording and start_playing; each failure is logged, never raised."""
+        media = getattr(self.reachy, "media", None)
+        if media is None:
+            return
+        for name in ("stop_recording", "start_recording", "start_playing"):
+            fn = getattr(media, name, None)
+            if callable(fn):
+                try:
+                    fn()
+                except Exception as exc:
+                    log.warning("%s failed: %s", name, exc)
+
     def _mic_loop(
         self, ws: SimpleWebSocket, stop_event: threading.Event, mic_stop: threading.Event
     ) -> None:
@@ -390,12 +415,37 @@ class RealtimeAudioBridge:
         in_sr = int(get_in_sr()) if callable(get_in_sr) else REALTIME_SAMPLE_RATE
         if in_sr <= 0:
             in_sr = 16000
+        last_sample_at = time.monotonic()
+        restarts = 0
         while not stop_event.is_set() and not mic_stop.is_set():
             try:
                 sample = media.get_audio_sample()
                 if sample is None:
+                    if time.monotonic() - last_sample_at >= MIC_STALL_S:
+                        if restarts >= MIC_MAX_RESTARTS:
+                            self.mic_stalled = True
+                            log.warning(
+                                "mic capture still stalled after %d restarts; closing realtime WS to force a reconnect",
+                                restarts,
+                            )
+                            ws.close()
+                            break
+                        restarts += 1
+                        log.warning(
+                            "mic capture stalled (no samples for %.1fs); restarting capture (%d/%d)",
+                            time.monotonic() - last_sample_at,
+                            restarts,
+                            MIC_MAX_RESTARTS,
+                        )
+                        self._restart_media()
+                        last_sample_at = time.monotonic()
                     time.sleep(0.02)
                     continue
+                last_sample_at = time.monotonic()
+                if restarts or self.mic_stalled:
+                    log.info("mic capture resumed after restart")
+                    restarts = 0
+                    self.mic_stalled = False
                 arr = np.asarray(sample)
                 if arr.size == 0:
                     time.sleep(0.02)
@@ -421,7 +471,8 @@ class RealtimeAudioBridge:
                     }
                 )
             except Exception as exc:
-                log.debug("mic loop ending: %s", exc)
+                log.warning("mic sender ending (%s); closing realtime WS to force a reconnect", exc)
+                ws.close()
                 break
 
     def _handle_server_event(self, ws: SimpleWebSocket, ev: dict[str, Any]) -> None:

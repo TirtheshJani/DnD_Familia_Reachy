@@ -17,7 +17,8 @@ check at that point; do not work around it silently.
 3. On the robot dashboard at http://10.0.0.100:8000, start
    `reachy_mini_conversation_app` (installed beside `rocky_mini` and
    `hand_tracker_v2`; no app was running on 2026-09-16). Note the app version it
-   shows: `robot_profile/familiar/profile.md` is written for 1.0.1.
+   shows: expect 1.2.0 or newer. Older releases (1.0.1, 1.1.x) have no mic send timeout,
+   and `scripts/robot_connect.py` logs a WARNING naming the minimum when it sees one.
 4. In the app's Settings view, Connection section, choose a local target of
    `<host LAN IP>:8765`, so the app connects to `ws://<host LAN IP>:8765/v1/realtime`.
 5. Select the `familiar` profile. If it is not listed, add it as the app README's
