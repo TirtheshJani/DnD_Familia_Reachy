@@ -23,6 +23,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Callable, TextIO
 
+from familiar_brain.stack_health import DEFAULT_STUCK_EXIT_S, pool_is_wedged
+
 log = logging.getLogger("familiar.wake_daemon")
 
 DISCOVER_MAGIC = b"REACHY_FAMILIAR_DISCOVER"
@@ -78,6 +80,17 @@ def _http_ok(url: str, timeout: float = 1.5) -> bool:
         return False
 
 
+def _http_json(url: str, timeout: float = 1.5) -> dict[str, Any] | None:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            if not 200 <= resp.status < 300:
+                return None
+            data = json.load(resp)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _http_post_quiet(url: str, timeout: float = 3.0) -> None:
     try:
         req = urllib.request.Request(url, data=b"{}", method="POST", headers={"Content-Type": "application/json"})
@@ -129,9 +142,15 @@ class StackManager:
     def _is_stack_live(self) -> bool:
         if self._probe_fn is not None:
             return bool(self._probe_fn())
-        return _http_ok(f"http://127.0.0.1:{self.brain_port}/api/state") and _http_ok(
-            f"http://127.0.0.1:{self.ws_port}/v1/pool"
-        )
+        if not _http_ok(f"http://127.0.0.1:{self.brain_port}/api/state"):
+            return False
+        pool = _http_json(f"http://127.0.0.1:{self.ws_port}/v1/pool")
+        if pool is None:
+            return False
+        if pool_is_wedged(pool, DEFAULT_STUCK_EXIT_S):
+            log.warning("s2s pool is wedged, so the stack is not live: %s", pool.get("units"))
+            return False
+        return True
 
     def _default_spawn(self) -> subprocess.Popen[str]:
         wsl_repo = windows_to_wsl_path(self.repo_root)

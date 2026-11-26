@@ -12,18 +12,33 @@ In speech-to-speech 1.0.0:
    silences the familiar until reconnect.
 4. One brain request could hold the LLM thread for about a minute: the SDK retried a
    timed-out request twice and nothing bounded a slow stream.
+5. A wedged handler leaves its pool unit "stuck" forever while /v1/pool still answers 200,
+   so every reconnect gets session_limit_reached. A watchdog thread exits with code 70
+   so start_all.sh restarts s2s.
 
 This wrapper applies surgical runtime guards before launching speech_to_speech.cli.main().
 """
 from __future__ import annotations
 
 import functools
+import json
 import logging
 import os
 import re
 import sys
 import threading
-from typing import Any, Iterator
+import time
+import urllib.request
+from pathlib import Path
+from typing import Any, Callable, Iterator
+
+# Run as a script from the s2s venv, so the repo root is not on sys.path by default.
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+# pool_is_wedged is re-exported here; the wake daemon imports it from familiar_brain.
+from familiar_brain.stack_health import DEFAULT_STUCK_EXIT_S, pool_is_wedged  # noqa: E402
 
 logger = logging.getLogger("run_s2s")
 
@@ -336,10 +351,68 @@ def apply_s2s_patches(
     patch_kokoro_voice_guard(KokoroTTSHandler)
 
 
+WEDGED_EXIT_CODE = 70
+POOL_POLL_INTERVAL_S = 5.0
+
+
+def pool_wedged_now(url: str, max_drain_s: float, timeout_s: float = POOL_POLL_INTERVAL_S) -> bool:
+    """One /v1/pool poll. Unreachable (models still loading) counts as not wedged."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout_s) as resp:
+            pool = json.load(resp)
+    except OSError:
+        return False
+    except ValueError as exc:
+        logger.warning("pool watchdog: /v1/pool returned bad JSON: %s", exc)
+        return False
+    if pool_is_wedged(pool, max_drain_s):
+        logger.warning("pool watchdog: s2s pool is wedged: %s", pool.get("units"))
+        return True
+    return False
+
+
+def watch_pool(
+    url: str,
+    *,
+    max_drain_s: float,
+    interval_s: float = POOL_POLL_INTERVAL_S,
+    exit_fn: Callable[[int], Any] = os._exit,
+) -> None:
+    while True:
+        time.sleep(interval_s)
+        if pool_wedged_now(url, max_drain_s, timeout_s=interval_s):
+            logger.warning("pool watchdog: exiting with code %d so start_all.sh restarts s2s", WEDGED_EXIT_CODE)
+            # os._exit skips logging's flush at exit, so flush the WARNING into s2s.log first.
+            for handler in logging.getLogger().handlers:
+                handler.flush()
+            sys.stderr.flush()
+            exit_fn(WEDGED_EXIT_CODE)
+
+
+def _serve_port(args: list[str]) -> int:
+    for i, arg in enumerate(args):
+        if arg == "--port" and i + 1 < len(args):
+            return int(args[i + 1])
+        if arg.startswith("--port="):
+            return int(arg.split("=", 1)[1])
+    return 8765  # speech_to_speech realtime server default
+
+
+def start_pool_watchdog(args: list[str]) -> threading.Thread:
+    url = f"http://127.0.0.1:{_serve_port(args)}/v1/pool"
+    max_drain_s = _env_float("S2S_STUCK_EXIT_S", DEFAULT_STUCK_EXIT_S)
+    thread = threading.Thread(
+        target=watch_pool, args=(url,), kwargs={"max_drain_s": max_drain_s}, daemon=True, name="pool-watchdog"
+    )
+    thread.start()
+    return thread
+
+
 def main(argv: list[str] | None = None) -> int:
     configure_cuda_env()
     configure_espeak_env()
     apply_s2s_patches()
+    start_pool_watchdog(list(sys.argv[1:] if argv is None else argv))
 
     from speech_to_speech.cli import main as s2s_main  # type: ignore[import-not-found]
 

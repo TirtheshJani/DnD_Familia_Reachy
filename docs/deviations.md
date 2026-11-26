@@ -1183,3 +1183,76 @@ New tests: `test_llm_stream_has_total_deadline_and_no_retries` in `tests/test_ru
 `tests/test_start_all_vad_args.py` (skipped on Windows, run in WSL with the brain venv);
 `test_addressed_stream_sends_headers_immediately` and
 `test_upstream_bounds_the_connect_and_each_read` in `tests/test_upstream.py`.
+
+## P23. The stack notices a dead or wedged process (2026-11-26)
+
+`start_all.sh` ended in a bare `wait`, so a dead s2s, tap, brain or llama went unnoticed and
+the wake daemon kept saying ready. A wedged s2s handler left its pool unit "stuck" while
+`/v1/pool` still answered 200, so every reconnect got `session_limit_reached`.
+
+- **`pool_is_wedged(pool_json, max_drain_s)`** (new `familiar_brain/stack_health.py`,
+  re-exported from `scripts/run_s2s.py`). The real s2s 1.0.0 shape, read from
+  `api/openai_realtime/websocket_router.py`, is
+  `{"size": N, "in_use": n, "units": [{"index", "state", "session_id", ...}]}` with `state`
+  one of `idle`, `active`, `draining` (adds `draining_for_s`) or `stuck` (adds
+  `draining_for_s` and `stuck_for_s`). Any `stuck` unit is wedged; a `draining` unit is
+  wedged once `draining_for_s >= max_drain_s`. The plan's field names were exact.
+- **Pool watchdog** (`scripts/run_s2s.py`, started from `main()` after the patches). A
+  daemon thread polls `http://127.0.0.1:<--port>/v1/pool` every 5 s with
+  `max_drain_s = S2S_STUCK_EXIT_S` (default 45). An unreachable server (models still
+  loading, connection refused, timeout) counts as not wedged; bad JSON logs a WARNING and
+  counts as not wedged. On a wedge it logs the units and the exit at WARNING, flushes the
+  log handlers and calls `os._exit(70)`. In s2s 1.0.0 a unit only turns `stuck` after its
+  10 s drain wait and 180 s quarantine timeout, so in practice the 45 s draining rule fires
+  first. `run_s2s.py` puts the repo root on `sys.path` so the s2s venv can import
+  `familiar_brain.stack_health` (that module imports nothing outside the stdlib).
+- **s2s respawn loop** (`scripts/start_all.sh`). s2s now runs inside `s2s_loop`, a
+  background subshell; `S2S_PID` is the loop's PID, so `wait_for` and the cleanup track the
+  loop. Each exit is logged to stderr (the terminal or `stack.log`) and to `s2s.log` with
+  its exit code, then s2s is started again after 1 s, up to 5 restarts in any 10 minutes;
+  the next exit after that ends the loop. `S2S_RESPAWN=0` turns the loop off. Exit code 70
+  is treated like any other exit, so a wedged pool gets a fresh s2s. With respawn on, an
+  s2s that dies while loading is restarted instead of failing the launch.
+- **No orphaned s2s.** The loop traps TERM and forwards it to its s2s. The cleanup also
+  collects the loop's own children with `pgrep -P` before sending TERM and then KILL, so an
+  s2s that takes longer than 0.3 s to exit is still killed even after the loop is gone. The
+  wake daemon's stop already matches `scripts/start_all.sh` (which matches the loop
+  subshell) and `scripts/run_s2s.py` in its `pkill`.
+- **`wait -n` over the long-lived children.** The final `wait` is now
+  `wait -n -p DEAD_PID` over llama, brain, the s2s loop and the audio tap (only when it was
+  started). `robot_connect.py` is not in the list: it runs in the foreground, configures the
+  robot and exits before this point, and `--skip-robot` / `--native-robot` skip it. When a
+  child exits, the script prints `<name> exited with code <rc>; stopping the stack` and
+  the tail of that child's log to stderr, then `exit 1`; the existing EXIT trap stops the
+  rest. The wake daemon's watcher already turns a non-zero exit (other than 143) into the
+  error state. If a signal stopped the stack during the wait, the script exits with the
+  wait's code (143 on TERM) without the message.
+- **Wake daemon** (`familiar_brain/wake_daemon.py`). `_is_stack_live()` now reads
+  `/v1/pool` as JSON and returns False, with a WARNING, when `pool_is_wedged(pool, 45)`.
+
+Deviations from the plan text:
+- `status()` (plan `:167-202`) was not changed. It already calls `_is_stack_live()` for a
+  sleeping stack and for a ready stack whose process has exited, and the watcher already
+  sets the error state on a non-zero stack exit, so the `_is_stack_live()` change covers it.
+- The watchdog exits on the first poll that finds a wedge. `S2S_STUCK_EXIT_S` is the
+  `max_drain_s` passed to `pool_is_wedged`, so "wedged for 45 s" is measured by s2s's own
+  `draining_for_s`, not by counting polls.
+- Extra test `test_pool_watchdog_exits_70_when_wedged_but_not_while_s2s_loads`.
+- `pgrep` is not in Git Bash, so on Windows bash the cleanup only signals the loop itself.
+  The stack runs in WSL, where procps provides it.
+- The existing e2e stub tests in `tests/e2e/test_tier1_happy_paths.py` now see `start_all.sh`
+  exit 1 when their stub children finish, instead of 0. `f01_3`, `f01_4` and `f01_5` still
+  pass (their assertions accept it); the file was not changed.
+
+Known limits: the watchdog does not catch an s2s whose HTTP server stops answering
+altogether (a timeout counts as not wedged). The 45 s default leaves about 10 s over the
+worst-case LLM turn from P22 (about 35 s). Not run on the real robot or with a real wedged
+s2s; the respawn loop and `wait -n` were exercised with stub children only.
+
+New tests: `test_pool_is_wedged_flags_stuck_and_long_drain` and
+`test_pool_watchdog_exits_70_when_wedged_but_not_while_s2s_loads` in `tests/test_run_s2s.py`
+(run on Windows and in WSL with the s2s venv);
+`test_start_all_exits_when_child_dies` and `test_s2s_respawns_once` in
+`tests/test_start_all_logs.py` (skipped on Windows, run in WSL with the brain venv; the
+second also checks that stopping the stack stops the respawned s2s);
+`test_stack_not_live_when_s2s_pool_stuck` in `tests/test_wake_and_reachy_app.py` (Windows).

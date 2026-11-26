@@ -102,13 +102,20 @@ cleanup() {
   fi
   CLEANED_UP=1
   echo "stopping children"
-  for pid in "${PIDS[@]:-}"; do
+  # s2s runs under the respawn loop, so stop the loop's own child too: a slow s2s exit
+  # must not outlive the loop and keep the GPU and the port.
+  local targets="${PIDS[*]:-}"
+  if [ -n "${S2S_PID:-}" ] && command -v pgrep >/dev/null 2>&1; then
+    targets="$targets $(pgrep -P "$S2S_PID" 2>/dev/null | tr '
+' ' ' || true)"
+  fi
+  for pid in $targets; do
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
       kill -TERM "$pid" 2>/dev/null || true
     fi
   done
   sleep 0.3
-  for pid in "${PIDS[@]:-}"; do
+  for pid in $targets; do
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
       kill -KILL "$pid" 2>/dev/null || true
     fi
@@ -167,6 +174,8 @@ else
   S2S_PORT="8765"
 fi
 
+TAP_PID=""
+
 # Launch llama-server, familiar-brain, and speech-to-speech IN PARALLEL so Companion UI opens
 # in ~12-15s while Gemma 4 and Parakeet+Kokoro load concurrently (~55-65s faster cold boot).
 log_to llama "$LLAMA_BIN" -hf "$MODEL" ${MMPROJ_ARGS:---mmproj-auto} \
@@ -203,11 +212,49 @@ S2S_ARGS=(
 
 # Run through scripts/run_s2s.py to bound VAD speculative turns and guard Kokoro voice overrides.
 # s2s stamps its own log lines, so it is not piped through ts.
-if [ -x "$S2S_VENV/bin/python" ]; then
-  "$S2S_VENV/bin/python" "$REPO/scripts/run_s2s.py" "${S2S_ARGS[@]}" >> "$RUN_DIR/s2s.log" 2>&1 &
-else
-  "$S2S_VENV/bin/speech-to-speech" "${S2S_ARGS[@]}" >> "$RUN_DIR/s2s.log" 2>&1 &
-fi
+# The loop restarts a dead or wedged s2s (run_s2s.py exits 70 on a stuck pool) up to
+# 5 times per 10 minutes. S2S_RESPAWN=0 turns it off.
+S2S_RESPAWN="${S2S_RESPAWN:-1}"
+s2s_note() {
+  echo "$*" >&2
+  echo "$*" >> "$RUN_DIR/s2s.log"
+}
+s2s_loop() {
+  local child="" rc now t
+  local -a restarts=() recent=()
+  trap 'if [ -n "$child" ]; then kill -TERM "$child" 2>/dev/null; fi; exit 143' TERM
+  while true; do
+    if [ -x "$S2S_VENV/bin/python" ]; then
+      "$S2S_VENV/bin/python" "$REPO/scripts/run_s2s.py" "${S2S_ARGS[@]}" >> "$RUN_DIR/s2s.log" 2>&1 &
+    else
+      "$S2S_VENV/bin/speech-to-speech" "${S2S_ARGS[@]}" >> "$RUN_DIR/s2s.log" 2>&1 &
+    fi
+    child=$!
+    rc=0
+    wait "$child" || rc=$?
+    child=""
+    if [ "$S2S_RESPAWN" != "1" ]; then
+      s2s_note "speech-to-speech exited with code $rc; not restarting (S2S_RESPAWN=$S2S_RESPAWN)"
+      exit "$rc"
+    fi
+    now=$SECONDS
+    recent=()
+    for t in "${restarts[@]}"; do
+      if [ $((now - t)) -lt 600 ]; then
+        recent+=("$t")
+      fi
+    done
+    restarts=("${recent[@]}")
+    if [ "${#restarts[@]}" -ge 5 ]; then
+      s2s_note "speech-to-speech exited with code $rc; already restarted 5 times in 10 minutes, giving up"
+      exit "$rc"
+    fi
+    restarts+=("$now")
+    s2s_note "speech-to-speech exited with code $rc; restarting (${#restarts[@]} of 5 in 10 minutes)"
+    sleep 1
+  done
+}
+s2s_loop &
 S2S_PID=$!
 PIDS+=("$S2S_PID")
 
@@ -258,4 +305,29 @@ else
   echo "Start a session: curl -X POST http://127.0.0.1:8090/api/session/start"
 fi
 
-wait
+# Stay up while every long-lived child is up (robot_connect.py above is one-shot and has
+# already finished). When one exits, say which, stop the rest and exit non-zero so the wake
+# daemon shows an error instead of ready.
+LONG_PIDS=("$LLAMA_PID" "$BRAIN_PID" "$S2S_PID")
+if [ -n "$TAP_PID" ]; then
+  LONG_PIDS+=("$TAP_PID")
+fi
+DEAD_PID=""
+rc=0
+wait -n -p DEAD_PID "${LONG_PIDS[@]}" || rc=$?
+if [ "$CLEANED_UP" = "1" ]; then
+  exit "$rc"  # the stack was stopped by a signal
+fi
+case "$DEAD_PID" in
+  "$LLAMA_PID") dead_name=llama-server; dead_log="$RUN_DIR/llama.log" ;;
+  "$BRAIN_PID") dead_name=familiar-brain; dead_log="$RUN_DIR/brain.log" ;;
+  "$S2S_PID")   dead_name=speech-to-speech; dead_log="$RUN_DIR/s2s.log" ;;
+  "${TAP_PID:-none}") dead_name=audio-tap; dead_log="$RUN_DIR/audio_tap.log" ;;
+  *)            dead_name="unknown child (pid ${DEAD_PID:-?})"; dead_log="" ;;
+esac
+echo "$dead_name exited with code $rc; stopping the stack" >&2
+if [ -n "$dead_log" ]; then
+  echo "tail of $dead_log:" >&2
+  tail -n 30 "$dead_log" >&2 || true
+fi
+exit 1

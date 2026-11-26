@@ -149,3 +149,69 @@ def test_start_all_timestamps_child_lines_when_ts_is_installed(stack: dict):
     assert _wait_for_text(run / "brain.log").startswith("TS brain stub"), result.stderr
     # s2s stamps its own lines, so it is not piped through ts
     assert (run / "s2s.log").read_text(encoding="utf-8").startswith("s2s stub")
+
+
+def _live_stack(stack: dict, s2s_body: str, llama_body: str = "exec sleep 30") -> Path:
+    """Stubs that pass every readiness probe, with the audio tap on and staying up."""
+    tmp = stack["repo"].parent
+    _stub(stack["bin"] / "curl", "exit 0")
+    _stub(tmp / "llama" / "llama-server", llama_body)
+    _stub(tmp / "brainenv" / "bin" / "familiar-brain", "exec sleep 30")
+    # BRAIN_PY: `-c import ...` probes the tap module, `-m familiar_brain.audio_tap` runs it.
+    _stub(tmp / "brainenv" / "bin" / "python", 'if [ "$1" = "-m" ]; then exec sleep 30; fi; exit 0')
+    (stack["repo"] / "familiar_brain").mkdir(exist_ok=True)
+    (stack["repo"] / "familiar_brain" / "audio_tap.py").write_text("", encoding="utf-8")
+    starts = tmp / "s2s_starts"
+    _stub(tmp / "s2s" / "bin" / "python", f'STARTS="{starts}"\n' + s2s_body)
+    return starts
+
+
+def _run_live(stack: dict, extra_env: dict | None = None) -> subprocess.CompletedProcess:
+    env = dict(stack["env"], **(extra_env or {}))
+    return subprocess.run(
+        ["bash", "scripts/start_all.sh", "--skip-robot"],
+        cwd=stack["repo"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+
+
+def test_start_all_exits_when_child_dies(stack: dict):
+    _live_stack(stack, 'echo start >> "$STARTS"; sleep 1; exit 3')
+
+    start = time.monotonic()
+    result = _run_live(stack, {"S2S_RESPAWN": "0"})
+    elapsed = time.monotonic() - start
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert elapsed < 5.0, (elapsed, result.stderr)
+    assert "audio-tap ready" in result.stdout, result.stdout + result.stderr
+    assert "speech-to-speech" in result.stderr and "exited" in result.stderr, result.stderr
+
+
+def test_s2s_respawns_once(stack: dict):
+    # First start exits with code 3; the respawned one stays up until the stack stops it.
+    starts = _live_stack(
+        stack,
+        'echo start >> "$STARTS"\n'
+        'if [ "$(wc -l < "$STARTS")" -le 1 ]; then sleep 0.5; exit 3; fi\n'
+        "trap 'echo stopped >> \"$STARTS\"; exit 0' TERM\n"
+        "sleep 30 & wait $!",
+        llama_body="sleep 3.5; exit 0",
+    )
+
+    result = _run_live(stack)
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "exited with code 3" in result.stderr and "restarting" in result.stderr, result.stderr
+    assert "llama-server" in result.stderr, result.stderr
+    lines = _wait_for_text(starts).split()
+    deadline = time.monotonic() + 3.0
+    while "stopped" not in lines and time.monotonic() < deadline:
+        time.sleep(0.05)
+        lines = starts.read_text(encoding="utf-8").split()
+    assert lines.count("start") == 2, lines
+    # Stopping the stack also stops the s2s that the respawn loop started.
+    assert "stopped" in lines, lines

@@ -305,3 +305,34 @@ def test_speaker_boost_applies_gain_with_soft_limit():
     loud = np.array([0.9, -0.95, 1.0], dtype=np.float32)
     limited = apply_speaker_boost(loud, 15.0)
     assert float(np.max(np.abs(limited))) <= 1.0
+
+
+def test_stack_not_live_when_s2s_pool_stuck(tmp_path: Path):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    pool = {"size": 1, "in_use": 1, "units": [{"index": 0, "state": "stuck", "session_id": "s",
+                                               "draining_for_s": 200.0, "stuck_for_s": 20.0}]}
+
+    class FakeStack(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            body = json.dumps(pool if self.path == "/v1/pool" else {"ok": True}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FakeStack)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        mgr = StackManager(repo_root=tmp_path, brain_port=port, ws_port=port)
+        assert mgr._is_stack_live() is False
+        pool["units"] = [{"index": 0, "state": "idle", "session_id": None}]
+        assert mgr._is_stack_live() is True
+    finally:
+        server.shutdown()
+        server.server_close()

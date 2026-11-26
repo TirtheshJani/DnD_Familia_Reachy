@@ -361,3 +361,60 @@ def test_llm_stream_has_total_deadline_and_no_retries(monkeypatch: pytest.Monkey
         stop.set()
         server.shutdown()
         server.server_close()
+
+
+def test_pool_is_wedged_flags_stuck_and_long_drain() -> None:
+    def pool(*units: dict) -> dict:
+        return {"size": len(units), "in_use": len(units), "units": list(units)}
+
+    # Field names match the installed s2s 1.0.0 /v1/pool handler (websocket_router.py).
+    assert run_s2s.pool_is_wedged(pool({"index": 0, "state": "stuck", "draining_for_s": 200.0, "stuck_for_s": 20.0}), 45) is True
+    assert run_s2s.pool_is_wedged(pool({"index": 0, "state": "draining", "draining_for_s": 60.0}), 45) is True
+    assert run_s2s.pool_is_wedged(pool({"index": 0, "state": "draining", "draining_for_s": 3.0}), 45) is False
+    assert run_s2s.pool_is_wedged(pool({"index": 0, "state": "idle", "session_id": None}), 45) is False
+    assert run_s2s.pool_is_wedged(pool({"index": 0, "state": "active", "session_id": "s"}), 45) is False
+    assert run_s2s.pool_is_wedged({}, 45) is False
+
+
+def test_pool_watchdog_exits_70_when_wedged_but_not_while_s2s_loads() -> None:
+    import json
+    import socket
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    # Nothing listening yet (models still loading): connection refused is not a wedge.
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        closed_port = s.getsockname()[1]
+    assert run_s2s.pool_wedged_now(f"http://127.0.0.1:{closed_port}/v1/pool", 45.0, timeout_s=1.0) is False
+
+    body = json.dumps({"size": 1, "in_use": 1, "units": [{"index": 0, "state": "stuck", "session_id": "s",
+                                                           "draining_for_s": 200.0, "stuck_for_s": 20.0}]}).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args: object) -> None:
+            pass
+
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    codes: list[int] = []
+
+    def fake_exit(code: int) -> None:
+        codes.append(code)
+        raise SystemExit(code)
+
+    try:
+        with pytest.raises(SystemExit):
+            run_s2s.watch_pool(f"http://127.0.0.1:{server.server_address[1]}/v1/pool",
+                               max_drain_s=45.0, interval_s=0.05, exit_fn=fake_exit)
+        assert codes == [70]
+    finally:
+        server.shutdown()
+        server.server_close()
