@@ -1198,3 +1198,51 @@ for the reasons the plan predicted (mic thread dead with no reconnect; `TimeoutE
 `_take`; `_run_session` still running) and pass on Windows (Python 3.11, uv) and in WSL
 Ubuntu-24.04. `tests/test_native_robot_and_profiles.py` and `tests/test_wake_and_reachy_app.py`
 pass on Windows.
+
+## P27. Native app restarts stalled mic capture and reports it in the heartbeat (2026-11-26)
+
+If GStreamer or ALSA stopped delivering samples, `get_audio_sample()` returned None forever
+and `_mic_loop` slept in a loop with no restart. Capture was also started only once in
+`run_loop`, so a reconnect never re-armed it.
+
+- **`_mic_loop`** (`reachy_familiar/audio_bridge.py`) tracks `last_sample_at`. After
+  `MIC_STALL_S` (1.5 s) of None samples it logs a WARNING containing "stalled" and calls
+  `_restart_media()`. After `MIC_MAX_RESTARTS` (2) restarts that bring no samples back, it
+  sets `mic_stalled`, logs a WARNING, calls `ws.close()` and exits, so the session
+  reconnects (P25). The first sample after a restart resets the counter, clears
+  `mic_stalled` and logs "mic capture resumed after restart" at INFO.
+- **`_restart_media()`** calls `stop_recording()`, `start_recording()`, `start_playing()`
+  on `reachy.media`. Each call that raises is logged at WARNING and the others still run, so
+  a media error never kills the mic thread.
+- **`run_loop`** no longer starts recording and playback once. **`_run_session`** calls
+  `_restart_media()` on every session, so a reconnect also re-arms capture. `run_loop`
+  still stops recording and playback when it exits.
+- **`RealtimeAudioBridge.mic_stalled`** (new) and `mic_alive` (P25) are sent as
+  `mic_alive` and `mic_stalled` in the robot heartbeat and kept in `boot_status()`
+  (`reachy_familiar/main.py`).
+
+Deviations from the plan text:
+- `_restart_media()` runs right after the WebSocket connects, not as the literal first line
+  of `_run_session`. While the laptop is unreachable each connect attempt fails, and
+  restarting the GStreamer pipeline every 2 s for nothing seemed worse than waiting for a
+  live connection.
+- Only a None sample counts as a stall, as the plan says. An empty array still sleeps
+  without counting toward a restart.
+- The brain's `/api/robot/heartbeat` (`familiar_brain/app.py` around line 1384) copies only
+  the fields it knows, so `mic_alive` and `mic_stalled` do not reach the Companion UI yet.
+  Task 3 lists only the two native app files, so the brain was not changed.
+- `start_playing()` now runs on every session without a `stop_playing()` first, as the plan
+  says. The `reachy_mini` package is not installed here, so repeat calls were not checked
+  against the real media API.
+
+Not run against the real robot.
+
+New tests in `tests/test_audio_bridge_backpressure.py`:
+`test_mic_loop_restarts_dead_capture` (frames for 0.5 s, then None until a
+`stop_recording` then `start_recording`) and
+`test_capture_dead_after_two_restarts_forces_reconnect` (never recovers, and
+`stop_recording` raises; asserts two restarts, a WARNING naming `stop_recording`,
+`mic_stalled` and `ws.close()`). Both failed against the old code for the reasons the plan
+predicted (no restart calls; WebSocket never closed) and pass on Windows (Python 3.11, uv).
+`tests/test_native_robot_and_profiles.py` and `tests/test_wake_and_reachy_app.py` pass on
+Windows.

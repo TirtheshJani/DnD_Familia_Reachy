@@ -22,6 +22,9 @@ from reachy_familiar.creature import CreatureController
 log = logging.getLogger("reachy_familiar.audio_bridge")
 
 REALTIME_SAMPLE_RATE = 24000
+# No mic samples for this long counts as a stalled capture; restart it this many times, then reconnect.
+MIC_STALL_S = 1.5
+MIC_MAX_RESTARTS = 2
 _WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
@@ -252,6 +255,7 @@ class RealtimeAudioBridge:
         self._reconnect_req = threading.Event()
         self._ws: SimpleWebSocket | None = None
         self._mic_thread: threading.Thread | None = None
+        self.mic_stalled = False
 
     @property
     def mic_alive(self) -> bool:
@@ -299,15 +303,6 @@ class RealtimeAudioBridge:
     def run_loop(self, stop_event: threading.Event) -> None:
         """Connect, stream audio, handle tool calls, and auto-reconnect until stop_event."""
         media = getattr(self.reachy, "media", None)
-        if media is not None:
-            for starter in ("start_recording", "start_playing"):
-                fn = getattr(media, starter, None)
-                if callable(fn):
-                    try:
-                        fn()
-                    except Exception as exc:
-                        log.warning("%s failed: %s", starter, exc)
-
         try:
             while not stop_event.is_set():
                 fast_retry = False
@@ -343,6 +338,8 @@ class RealtimeAudioBridge:
     def _run_session(self, stop_event: threading.Event) -> None:
         ws = SimpleWebSocket(self.host, self.port, "/v1/realtime", timeout=10.0)
         self._ws = ws
+        # (Re)arm capture and playback on every session, so a reconnect also restarts dead capture.
+        self._restart_media()
         self.connected = True
         self._barge_in_muted = False
         if self.on_connected:
@@ -395,6 +392,19 @@ class RealtimeAudioBridge:
             mic_stop.set()
             mic_thread.join(timeout=2.0)
 
+    def _restart_media(self) -> None:
+        """stop_recording, then start_recording and start_playing; each failure is logged, never raised."""
+        media = getattr(self.reachy, "media", None)
+        if media is None:
+            return
+        for name in ("stop_recording", "start_recording", "start_playing"):
+            fn = getattr(media, name, None)
+            if callable(fn):
+                try:
+                    fn()
+                except Exception as exc:
+                    log.warning("%s failed: %s", name, exc)
+
     def _mic_loop(
         self, ws: SimpleWebSocket, stop_event: threading.Event, mic_stop: threading.Event
     ) -> None:
@@ -405,12 +415,37 @@ class RealtimeAudioBridge:
         in_sr = int(get_in_sr()) if callable(get_in_sr) else REALTIME_SAMPLE_RATE
         if in_sr <= 0:
             in_sr = 16000
+        last_sample_at = time.monotonic()
+        restarts = 0
         while not stop_event.is_set() and not mic_stop.is_set():
             try:
                 sample = media.get_audio_sample()
                 if sample is None:
+                    if time.monotonic() - last_sample_at >= MIC_STALL_S:
+                        if restarts >= MIC_MAX_RESTARTS:
+                            self.mic_stalled = True
+                            log.warning(
+                                "mic capture still stalled after %d restarts; closing realtime WS to force a reconnect",
+                                restarts,
+                            )
+                            ws.close()
+                            break
+                        restarts += 1
+                        log.warning(
+                            "mic capture stalled (no samples for %.1fs); restarting capture (%d/%d)",
+                            time.monotonic() - last_sample_at,
+                            restarts,
+                            MIC_MAX_RESTARTS,
+                        )
+                        self._restart_media()
+                        last_sample_at = time.monotonic()
                     time.sleep(0.02)
                     continue
+                last_sample_at = time.monotonic()
+                if restarts or self.mic_stalled:
+                    log.info("mic capture resumed after restart")
+                    restarts = 0
+                    self.mic_stalled = False
                 arr = np.asarray(sample)
                 if arr.size == 0:
                     time.sleep(0.02)

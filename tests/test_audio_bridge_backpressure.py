@@ -301,3 +301,118 @@ def test_mic_send_failure_triggers_reconnect(monkeypatch, caplog):
     assert not bridge.mic_alive
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING and "mic" in r.getMessage().lower()]
     assert warnings, "no WARNING mentioning the mic was logged"
+
+
+class _StallingMedia:
+    """Mic frames for `good_for` seconds, then None. With `recover`, a stop_recording then
+    start_recording brings frames back. With `stop_raises`, stop_recording raises."""
+
+    def __init__(self, good_for: float, recover: bool, stop_raises: bool = False) -> None:
+        self.t0 = time.monotonic()
+        self.good_for = good_for
+        self.recover = recover
+        self.stop_raises = stop_raises
+        self.stopped = False
+        self.recovered = False
+        self.calls: list[tuple[str, float]] = []
+
+    def get_audio_sample(self):
+        time.sleep(0.01)
+        if self.recovered or time.monotonic() - self.t0 < self.good_for:
+            return np.full((320, 2), 0.01, np.float32)
+        return None
+
+    def stop_recording(self) -> None:
+        self.calls.append(("stop_recording", time.monotonic()))
+        self.stopped = True
+        if self.stop_raises:
+            raise RuntimeError("alsa device gone")
+
+    def start_recording(self) -> None:
+        self.calls.append(("start_recording", time.monotonic()))
+        if self.recover and self.stopped:
+            self.recovered = True
+
+    def start_playing(self) -> None:
+        self.calls.append(("start_playing", time.monotonic()))
+
+
+class _RecordingWS:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, float]] = []
+        self.closed = threading.Event()
+
+    def send_json(self, obj) -> None:
+        self.sent.append((obj.get("type"), time.monotonic()))
+
+    def close(self) -> None:
+        self.closed.set()
+
+
+def _run_mic_loop(bridge: RealtimeAudioBridge, ws: _RecordingWS, seconds: float) -> threading.Thread:
+    stop_event = threading.Event()
+    mic_stop = threading.Event()
+    t = threading.Thread(target=bridge._mic_loop, args=(ws, stop_event, mic_stop), daemon=True, name="test-mic")
+    try:
+        t.start()
+        ws.closed.wait(timeout=seconds)
+    finally:
+        mic_stop.set()
+        stop_event.set()
+        t.join(timeout=2.0)
+    assert not t.is_alive(), "_mic_loop did not stop"
+    return t
+
+
+def test_mic_loop_restarts_dead_capture(caplog):
+    caplog.set_level(logging.WARNING, logger="reachy_familiar.audio_bridge")
+    media = _StallingMedia(good_for=0.5, recover=True)
+    bridge = RealtimeAudioBridge(
+        host="127.0.0.1", port=1, reachy_mini=_FakeReachy(media), creature=_FakeCreature()
+    )
+    ws = _RecordingWS()
+    stall_at = media.t0 + 0.5
+    stop_event = threading.Event()
+    mic_stop = threading.Event()
+    t = threading.Thread(target=bridge._mic_loop, args=(ws, stop_event, mic_stop), daemon=True, name="test-mic")
+    try:
+        t.start()
+        time.sleep(3.5)
+    finally:
+        mic_stop.set()
+        stop_event.set()
+        t.join(timeout=2.0)
+    assert not t.is_alive(), "_mic_loop did not stop"
+
+    names = [n for n, _ in media.calls]
+    assert "stop_recording" in names and "start_recording" in names, f"no capture restart: {media.calls}"
+    stop_t = next(ts for n, ts in media.calls if n == "stop_recording")
+    start_t = next(ts for n, ts in media.calls if n == "start_recording")
+    assert stop_t <= start_t
+    assert start_t - stall_at <= 2.5, f"restart came {start_t - stall_at:.2f}s after the stall"
+    assert any(
+        r.levelno >= logging.WARNING and "stalled" in r.getMessage() for r in caplog.records
+    ), "no WARNING containing 'stalled'"
+    resumed = [ts for typ, ts in ws.sent if typ == "input_audio_buffer.append" and ts > start_t]
+    assert resumed, "no input_audio_buffer.append after the restart"
+    assert not ws.closed.is_set(), "a successful restart must not force a reconnect"
+    assert bridge.mic_stalled is False
+
+
+def test_capture_dead_after_two_restarts_forces_reconnect(caplog):
+    caplog.set_level(logging.WARNING, logger="reachy_familiar.audio_bridge")
+    # Never recovers, and stop_recording itself raises: the restart must log it and carry on.
+    media = _StallingMedia(good_for=0.0, recover=False, stop_raises=True)
+    bridge = RealtimeAudioBridge(
+        host="127.0.0.1", port=1, reachy_mini=_FakeReachy(media), creature=_FakeCreature()
+    )
+    ws = _RecordingWS()
+    _run_mic_loop(bridge, ws, seconds=6.0)
+
+    assert ws.closed.is_set(), "dead capture never closed the WebSocket"
+    assert bridge.mic_stalled is True
+    starts = [n for n, _ in media.calls if n == "start_recording"]
+    assert len(starts) == 2, f"expected 2 restarts before giving up: {media.calls}"
+    assert any(
+        r.levelno >= logging.WARNING and "stop_recording" in r.getMessage() for r in caplog.records
+    ), "stop_recording failure was not logged at WARNING"

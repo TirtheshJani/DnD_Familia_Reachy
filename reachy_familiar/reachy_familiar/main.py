@@ -70,6 +70,8 @@ class ReachyFamiliarApp(ReachyMiniApp):
             "brain_url": None,
             "audio_connected": False,
             "mic_level": 0.0,
+            "mic_alive": False,
+            "mic_stalled": False,
             "speaker_boost_db": 6.0,
         }
 
@@ -199,6 +201,8 @@ class ReachyFamiliarApp(ReachyMiniApp):
                     active_brain_url,
                     connected=connected,
                     mic_level=bridge.mic_level if bridge else 0.0,
+                    mic_alive=bool(bridge and bridge.mic_alive),
+                    mic_stalled=bool(bridge and bridge.mic_stalled),
                 )
 
             initial_state = self._fetch_brain_state(active_brain_url) or {}
@@ -229,6 +233,8 @@ class ReachyFamiliarApp(ReachyMiniApp):
                 self._set_boot_state(
                     audio_connected=bool(bridge and bridge.connected),
                     mic_level=mic_lvl,
+                    mic_alive=bool(bridge and bridge.mic_alive),
+                    mic_stalled=bool(bridge and bridge.mic_stalled),
                     speaker_boost_db=bridge.speaker_boost_db if bridge else initial_boost,
                 )
                 if now - last_hb >= 5.0:
@@ -236,6 +242,8 @@ class ReachyFamiliarApp(ReachyMiniApp):
                         active_brain_url,
                         connected=bool(bridge and bridge.connected),
                         mic_level=mic_lvl,
+                        mic_alive=bool(bridge and bridge.mic_alive),
+                        mic_stalled=bool(bridge and bridge.mic_stalled),
                     )
                     last_hb = now
                 state = self._fetch_brain_state(active_brain_url)
@@ -278,7 +286,13 @@ class ReachyFamiliarApp(ReachyMiniApp):
 
     @staticmethod
     def _send_heartbeat(
-        brain_url: str, *, connected: bool, detail: str | None = None, mic_level: float = 0.0
+        brain_url: str,
+        *,
+        connected: bool,
+        detail: str | None = None,
+        mic_level: float = 0.0,
+        mic_alive: bool = False,
+        mic_stalled: bool = False,
     ) -> None:
         try:
             requests.post(
@@ -288,6 +302,8 @@ class ReachyFamiliarApp(ReachyMiniApp):
                     "host": "reachy-mini.local",
                     "app": "reachy_familiar",
                     "mic_level": round(float(mic_level), 3),
+                    "mic_alive": bool(mic_alive),
+                    "mic_stalled": bool(mic_stalled),
                     "detail": detail or ("connected via reachy_familiar" if connected else "reconnecting"),
                 },
                 timeout=1.5,
